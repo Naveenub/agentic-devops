@@ -214,6 +214,8 @@ policy:
 
 ---
 
+---
+
 🧪 Evaluation & Safety
 Hallucination Detection
 
@@ -226,6 +228,8 @@ Confidence Scoring
 Based on retrieval depth + agreement between agents
 
 Low confidence → PagerDuty escalation
+
+---
 
 ## 📸 Screenshots & Demo Flow
 
