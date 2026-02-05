@@ -1,0 +1,9 @@
+What this GIF SHOULD show (Storyboard)
+| Time   | Scene                             |
+| ------ | --------------------------------- |
+| 0–5s   | Slack command `/incident analyze` |
+| 5–15s  | Logs + RAG retrieval in terminal  |
+| 15–30s | Root cause explanation            |
+| 30–45s | Confidence score shown            |
+| 45–60s | Terraform drift output            |
+| 60–90s | Final summary                     |
