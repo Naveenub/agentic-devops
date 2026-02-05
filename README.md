@@ -125,8 +125,16 @@ devops-ai-agent/
 │   └── cli.py                 # Interactive CLI
 ├── docs/
 │   ├── screenshots/
-│   └── demo/
-│       └── devops-agent-demo.gif
+│   │   ├── README.md
+│   │   ├── 01-slack-alert.png
+│   │   ├── 02-agent-analysis.png
+│   │   ├── 03-root-cause.png
+│   │   ├── 04-confidence-score.png
+│   │   │   └──  05-terraform-drift.png
+├── demo/
+    ├── README.md
+    ├── demo-script.md
+    └── devops-agent-demo.gif
 ├── docker-compose.yml
 ├── requirements.txt
 ├── .env.example
