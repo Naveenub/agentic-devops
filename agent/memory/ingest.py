@@ -2,6 +2,7 @@ import os
 import json
 from chromadb import Client
 from chromadb.utils import embedding_functions
+from pathlib import Path
 
 DATA_DIR = "data"
 
@@ -29,6 +30,18 @@ def ingest():
         )
 
     print(f"Ingested {len(docs)} documents into Chroma")
+
+def ingest_dir(path):
+    for file in Path(path).rglob("*.*"):
+        collection.add(
+            documents=[file.read_text()],
+            metadatas=[{"source": str(file)}],
+            ids=[str(file)]
+        )
+
+ingest_dir("data/runbooks")
+ingest_dir("data/incidents")
+ingest_dir("data/logs")
 
 if __name__ == "__main__":
     ingest()
