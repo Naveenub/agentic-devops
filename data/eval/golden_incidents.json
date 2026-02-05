@@ -1,0 +1,6 @@
+[
+  {
+    "query": "payments-api pod restarting",
+    "expected_root_cause": "OOMKilled"
+  }
+]
