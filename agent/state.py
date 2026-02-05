@@ -9,3 +9,15 @@ class AgentState:
     suggestion: Optional[str] = None
     sources: List[str] = field(default_factory=list)
     confidence: float = 0.0
+
+class AgentState(TypedDict):
+    question: str
+    observations: list
+    diagnosis: str
+    suggestions: list
+    rag_sources: list
+    confidence: float
+
+from agent.confidence import calculate_confidence
+
+state["confidence"] = calculate_confidence(state)
