@@ -1,17 +1,37 @@
-from agent.graph import agent
-import json
+# agent/eval.py
 
-def run_eval():
-    tests = json.load(open("data/eval/golden_incidents.json"))
+from agent.memory.chroma import query_knowledge
 
-    for t in tests:
-        result = agent.invoke({"question": t["question"]})
-        diagnosis = result.get("diagnosis", "")
+def evaluate_hallucination(test_case: dict) -> dict:
+    """
+    Evaluate whether the agent response is grounded in retrieved knowledge.
+    """
 
-        if t["expected_root_cause"].lower() not in diagnosis.lower():
-            print("❌ Hallucination detected")
-        else:
-            print("✅ Passed")
+    query = test_case["query"]
+    expected_sources = test_case.get("expected_sources", [])
 
-if __name__ == "__main__":
-    run_eval()
+    results = query_knowledge(query, n_results=5)
+
+    retrieved_docs = results.get("documents", [[]])[0]
+    retrieved_sources = results.get("metadatas", [[]])[0]
+
+    if not retrieved_docs:
+        return {
+            "grounded": False,
+            "score": 0.0,
+            "reason": "No documents retrieved"
+        }
+
+    matched_sources = [
+        meta["source"]
+        for meta in retrieved_sources
+        if meta.get("source") in expected_sources
+    ]
+
+    score = len(matched_sources) / max(len(expected_sources), 1)
+
+    return {
+        "grounded": score > 0.5,
+        "score": round(score, 2),
+        "matched_sources": matched_sources
+    }
