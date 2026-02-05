@@ -1,9 +1,14 @@
-# EKS Pod OOMKilled
+# Incident Runbook: EKS Pod OOMKill
 
 ## Symptoms
-- Pod restarts continuously
-- Status: CrashLoopBackOff
+- Pod enters CrashLoopBackOff
+- Container terminated with exit code 137
+- Kubernetes events show `OOMKilled`
 
-## Resolution
-- Increase memory limits
-- Investigate memory leaks
+## Root Cause
+The container memory limit was too low for peak traffic load, causing the kernel to kill the process.
+
+## Verification
+```bash
+kubectl describe pod <pod-name>
+kubectl logs <pod-name> --previous
