@@ -1,0 +1,6 @@
+{
+  "id": "INC-2024-11",
+  "service": "payments-api",
+  "root_cause": "OOMKilled",
+  "fix": "Increased memory limits"
+}
