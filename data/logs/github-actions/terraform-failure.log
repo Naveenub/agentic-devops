@@ -1,1 +1,3 @@
-Error: AccessDenied: User is not authorized to perform iam:PassRole
+Error: AccessDeniedException: User is not authorized to perform iam:PassRole
+on resource arn:aws:iam::123456789012:role/terraform-ci
+Terraform exited with code 1
