@@ -1,6 +1,9 @@
 {
-  "id": "INC-2024-12",
-  "tool": "terraform",
-  "error": "AccessDenied",
-  "fix": "Updated IAM policy"
+  "id": "INC-2024-12-TF-IAM",
+  "service": "infra-ci",
+  "platform": "Terraform",
+  "symptoms": ["AccessDeniedException"],
+  "root_cause": "Missing IAM permissions",
+  "resolution": "Updated IAM policy",
+  "runbook": "terraform-iam-deny.md"
 }
