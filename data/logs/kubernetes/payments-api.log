@@ -1,2 +1,3 @@
-OOMKilled: Container memory usage exceeded
-Restarting container...
+Error: Java heap space
+Killed process 12345 (java) total-vm:512000kB
+Container terminated with exit code 137
