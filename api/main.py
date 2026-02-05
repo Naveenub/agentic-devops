@@ -15,3 +15,4 @@ def analyze(payload: dict):
         "confidence": result.confidence,
         "sources": result.sources
     }
+    
