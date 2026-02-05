@@ -101,18 +101,29 @@ The repository includes **realistic sample data** so the agent works out-of-the-
 
 ```
 devops-ai-agent/
+├── .github/
+│   ├── workflows/
+│   │   └── eval.yml
 ├── api/
 │   └── main.py                # FastAPI entrypoint
 ├── agent/
+│   ├── Makefile
+│   ├── confidence.py
+│   ├── eval.py
 │   ├── graph.py               # LangGraph wiring
+│   ├── hallucination_eval.py
+│   ├── orchestrator.py
 │   ├── state.py               # Shared agent state
 │   ├── nodes/
 │   │   ├── observe.py         # Fetch logs / cluster state
 │   │   ├── diagnose.py        # LLM + RAG reasoning
-│   │   └── suggest.py         # Fix generation
+│   │   ├── suggest.py         # Fix generation
+│   │   └── Diagnoser Prompt.txt
 │   ├── tools/
+│   │   ├── aws_costs.py
 │   │   ├── kubernetes.py      # Safe kubectl wrapper (read-only)
 │   │   ├── github.py          # GitHub Actions log fetcher
+│   │   ├── slack.py
 │   │   └── terraform.py       # Terraform error parser
 │   └── memory/
 │       ├── chroma.py          # Vector store init
@@ -137,20 +148,23 @@ devops-ai-agent/
 ├── ui/
 │   └── cli.py                 # Interactive CLI
 ├── docs/
+│   ├── demo/
+│   │   ├── README.md
+│   │   ├── demo-script.md
+│   │   └── devops-agent-demo.md
 │   ├── screenshots/
 │   │   ├── README.md
 │   │   ├── 01-slack-alert.png
 │   │   ├── 02-agent-analysis.png
 │   │   ├── 03-root-cause.png
 │   │   ├── 04-confidence-score.png
-│   │   └──  05-terraform-drift.png
-├── demo/
-    ├── README.md
-    ├── demo-script.md
-    └── devops-agent-demo.gif
+│   │   └── 05-terraform-drift.png
+├── .env.example
+├── .gitignore
+├── LICENSE
+├── Makefile
 ├── docker-compose.yml
 ├── requirements.txt
-├── .env.example
 └── README.md
 ```
 
