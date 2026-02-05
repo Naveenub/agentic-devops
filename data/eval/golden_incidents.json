@@ -4,3 +4,9 @@
     "expected_root_cause": "OOMKilled"
   }
 ]
+[
+  {
+    "question": "Why is payments-api crashing?",
+    "expected_root_cause": "Insufficient memory limits"
+  }
+]
