@@ -133,32 +133,6 @@ devops-ai-agent/
 └── README.md
 ```
 
-```
-devops-ai-agent/
-├── api/                # FastAPI server
-│   └── main.py
-├── agent/
-│   ├── graph.py        # LangGraph wiring
-│   ├── state.py        # Agent state
-│   ├── nodes/          # Agent steps
-│   │   ├── observe.py
-│   │   ├── diagnose.py
-│   │   └── suggest.py
-│   ├── tools/          # Safe DevOps tools
-│   │   ├── kubernetes.py
-│   │   └── github.py
-│   └── memory/
-│       └── chroma.py   # Vector memory
-├── ui/
-│   └── cli.py          # Interactive CLI
-├── data/
-│   └── runbooks/       # Markdown runbooks
-├── docker-compose.yml
-├── requirements.txt
-├── .env.example
-└── README.md
-```
-
 ---
 
 ## 🛠️ Tech Stack
