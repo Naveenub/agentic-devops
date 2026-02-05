@@ -1,4 +1,4 @@
-# 🤖 DevOps AI Agent (MVP)
+# 🤖 DevOps AI Agent
 
 A **local-first, open-source AI agent for DevOps** that diagnoses Kubernetes and CI/CD failures using **real logs, cluster state, LLM reasoning, and retrieval-augmented generation (RAG)**.
 
