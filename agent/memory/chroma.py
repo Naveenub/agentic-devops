@@ -10,3 +10,10 @@ def query_knowledge(query: str, n_results: int = 3, where: dict | None = None):
         n_results=n_results,
         where=where
     )
+
+def add_documents(documents, metadatas, ids):
+    _collection.add(
+        documents=documents,
+        metadatas=metadatas,
+        ids=ids
+    )
