@@ -1,25 +1,32 @@
-import boto3
-from datetime import date, timedelta
+from agent.memory.chroma import query_knowledge
 
-def get_cost_breakdown(days=7):
-    ce = boto3.client("ce")
+def analyze_cost_anomaly(service: str, region: str):
+    """
+    Detect AWS cost anomalies using historical cost incidents.
+    """
 
-    end = date.today()
-    start = end - timedelta(days=days)
+    query = f"AWS {service} cost spike in {region}"
 
-    response = ce.get_cost_and_usage(
-        TimePeriod={
-            "Start": start.strftime("%Y-%m-%d"),
-            "End": end.strftime("%Y-%m-%d")
-        },
-        Granularity="DAILY",
-        Metrics=["UnblendedCost"],
-        GroupBy=[
-            {"Type": "DIMENSION", "Key": "SERVICE"}
-        ]
+    results = query_knowledge(
+        query,
+        n_results=5,
+        where={"type": "cost_incident"}
     )
 
-    return response["ResultsByTime"]
+    documents = results.get("documents", [[]])[0]
 
-def analyze(cost_data):
-    return "Cost anomaly detected: z-score > 2"
+    if not documents:
+        return {
+            "anomaly": False,
+            "confidence": 0.1,
+            "message": "No historical cost anomalies found."
+        }
+
+    # MVP heuristic (std-dev / z-score logic placeholder)
+    confidence = min(0.9, 0.3 + (len(documents) * 0.1))
+
+    return {
+        "anomaly": True,
+        "confidence": confidence,
+        "message": f"Detected similar AWS {service} cost anomalies in historical data."
+    }
