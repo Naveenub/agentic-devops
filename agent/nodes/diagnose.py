@@ -5,3 +5,6 @@ def diagnose(state):
     state.diagnosis = "Pod likely OOMKilled based on historical incidents."
     state.sources = [d["source"] for d in docs]
     return state
+
+def diagnose(context):
+    return "Likely OOMKilled based on prior incidents"
