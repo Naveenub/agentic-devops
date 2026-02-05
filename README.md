@@ -82,6 +82,19 @@ sequenceDiagram
 
 ---
 
+💰 Cost Anomaly Detection Flow
+
+flowchart LR
+    CE[AWS Cost Explorer]
+    CostAgent[Cost Agent]
+    Stats[Z-Score Engine]
+    Alert[Slack / PagerDuty]
+
+    CE --> CostAgent
+    CostAgent --> Stats
+    Stats -->|z > 2| Alert
+
+
 ## 📁 Repository Structure
 
 The repository includes **realistic sample data** so the agent works out-of-the-box and RAG is immediately effective.
@@ -200,6 +213,19 @@ policy:
 ```
 
 ---
+
+🧪 Evaluation & Safety
+Hallucination Detection
+
+Measures unsupported tokens vs retrieved context
+
+Fails CI if hallucination score exceeds threshold
+
+Confidence Scoring
+
+Based on retrieval depth + agreement between agents
+
+Low confidence → PagerDuty escalation
 
 ## 📸 Screenshots & Demo Flow
 
