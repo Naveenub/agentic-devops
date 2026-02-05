@@ -1,47 +1,29 @@
+# agents/memory/ingest.py
 import os
-import json
-from chromadb import Client
-from chromadb.utils import embedding_functions
-from pathlib import Path
+from rag.vectorstore import get_collection
 
-DATA_DIR = "data"
+collection = get_collection()
 
-def ingest():
-    client = Client()
-    collection = client.get_or_create_collection(
-        name="devops-memory",
-        embedding_function=embedding_functions.DefaultEmbeddingFunction()
+SUPPORTED_EXTENSIONS = {".md", ".txt", ".log"}
+
+def ingest_directory(path: str):
+    for root, _, files in os.walk(path):
+        for file in files:
+            if os.path.splitext(file)[1] in SUPPORTED_EXTENSIONS:
+                full_path = os.path.join(root, file)
+                ingest_file(full_path)
+
+def ingest_file(filepath: str):
+    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+
+    collection.add(
+        documents=[content],
+        metadatas=[{"source": filepath}],
+        ids=[filepath]
     )
 
-    docs = []
-
-    for root, _, files in os.walk(DATA_DIR):
-        for f in files:
-            path = os.path.join(root, f)
-            if f.endswith(".md"):
-                docs.append(open(path).read())
-            elif f.endswith(".json"):
-                docs.append(json.dumps(json.load(open(path))))
-
-    for i, doc in enumerate(docs):
-        collection.add(
-            documents=[doc],
-            ids=[f"doc-{i}"]
-        )
-
-    print(f"Ingested {len(docs)} documents into Chroma")
-
-def ingest_dir(path):
-    for file in Path(path).rglob("*.*"):
-        collection.add(
-            documents=[file.read_text()],
-            metadatas=[{"source": str(file)}],
-            ids=[str(file)]
-        )
-
-ingest_dir("data/runbooks")
-ingest_dir("data/incidents")
-ingest_dir("data/logs")
+    print(f"✅ Ingested: {filepath}")
 
 if __name__ == "__main__":
-    ingest()
+    ingest_directory("data/")
