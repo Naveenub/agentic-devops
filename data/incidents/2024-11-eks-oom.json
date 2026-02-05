@@ -1,6 +1,9 @@
 {
-  "id": "INC-2024-11",
+  "id": "INC-2024-11-EKS-OOM",
   "service": "payments-api",
-  "root_cause": "OOMKilled",
-  "fix": "Increased memory limits"
+  "platform": "EKS",
+  "symptoms": ["CrashLoopBackOff", "ExitCode137"],
+  "root_cause": "Insufficient memory limits",
+  "resolution": "Increased memory to 512Mi",
+  "runbook": "eks-oomkill.md"
 }
