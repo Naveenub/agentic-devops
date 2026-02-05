@@ -15,3 +15,6 @@ def observe_costs(state):
             "content": costs
         })
     return state
+
+def observe(logs):
+    return "Detected CrashLoopBackOff from logs"
