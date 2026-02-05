@@ -1,0 +1,7 @@
+Analyze AWS cost data.
+Identify:
+- Primary cost drivers
+- Sudden anomalies
+- Optimization opportunities
+
+Cite Cost Explorer data.
