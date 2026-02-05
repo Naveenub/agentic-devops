@@ -1,0 +1,6 @@
+{
+  "id": "INC-2024-12",
+  "tool": "terraform",
+  "error": "AccessDenied",
+  "fix": "Updated IAM policy"
+}
