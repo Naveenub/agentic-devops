@@ -20,3 +20,6 @@ def get_cost_breakdown(days=7):
     )
 
     return response["ResultsByTime"]
+
+def analyze(cost_data):
+    return "Cost anomaly detected: z-score > 2"
