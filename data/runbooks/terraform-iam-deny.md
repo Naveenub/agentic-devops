@@ -1,8 +1,13 @@
-# Terraform IAM Access Denied
+# Runbook: Terraform IAM AccessDenied
 
-## Cause
-- Missing IAM permission
+## Symptoms
+- Terraform apply fails
+- Error: AccessDeniedException
+
+## Root Cause
+IAM role used by CI pipeline lacks required permissions.
 
 ## Resolution
-- Attach required policy
-- Re-run terraform apply
+- Identify missing IAM actions from error
+- Update least-privilege policy
+- Re-run terraform plan before apply
