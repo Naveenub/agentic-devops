@@ -2,4 +2,4 @@ ingest:
 	python agent/memory/ingest.py
 
 eval:
-	python eval/hallucination_eval.py
+	python agent/hallucination_eval.py
