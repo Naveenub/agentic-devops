@@ -1,5 +1,8 @@
 {
-  "id": "INC-2025-01",
-  "system": "CI",
-  "issue": "Insufficient GitHub permissions"
+  "id": "INC-2025-01-CI-PERM",
+  "service": "github-actions",
+  "platform": "CI/CD",
+  "symptoms": ["Pipeline failure"],
+  "root_cause": "Expired AWS credentials",
+  "resolution": "Rotated credentials"
 }
