@@ -2,8 +2,10 @@ fastapi
 uvicorn
 langgraph
 chromadb
+numpy
 pydantic
 slack_sdk
-pytest
 httpx
 boto3
+# test-only; kept here because CI and `make test` install this file
+pytest

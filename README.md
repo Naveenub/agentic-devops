@@ -26,9 +26,10 @@ This agent acts like a **junior SRE that never sleeps**:
 ### ✅ Included
 
 * Kubernetes failure diagnosis (CrashLoopBackOff, OOM, ImagePull, etc.)
-* GitHub Actions CI failure analysis
+* GitHub Actions CI failure analysis and Terraform error parsing
+* AWS cost anomaly detection with Slack / PagerDuty alerts
 * Incident memory using vector search (Chroma)
-* CLI + REST API interface
+* CLI, REST API and Slack slash-command interface
 * Docker-based one-command setup
 
 ### 🚫 Not Included (Yet)
@@ -43,7 +44,7 @@ This agent acts like a **junior SRE that never sleeps**:
 
 ```mermaid
 graph TD
-    User[User CLI / Web] --> API[FastAPI /ask]
+    User[User CLI / Web / Slack] --> API[FastAPI /analyze]
     API --> Agent[LangGraph Agent]
 
     Agent --> Observe[Observe Node]
@@ -82,8 +83,9 @@ sequenceDiagram
 
 ---
 
-💰 Cost Anomaly Detection Flow
+## 💰 Cost Anomaly Detection Flow
 
+```mermaid
 flowchart LR
     CE[AWS Cost Explorer]
     CostAgent[Cost Agent]
@@ -93,6 +95,7 @@ flowchart LR
     CE --> CostAgent
     CostAgent --> Stats
     Stats -->|z > 2| Alert
+```
 
 
 ## 📁 Repository Structure
@@ -100,19 +103,23 @@ flowchart LR
 The repository includes **realistic sample data** so the agent works out-of-the-box and RAG is immediately effective.
 
 ```
-devops-ai-agent/
-├── .github/
-│   ├── workflows/
-│   │   └── eval.yml
+agentic-devops/
+├── .github/workflows/eval.yml  # CI: tests, offline eval, report check
 ├── api/
-│   └── main.py                # FastAPI entrypoint
+│   └── main.py                # FastAPI: /analyze, /cost/check, /slack/command, /healthz
 ├── agent/
 │   ├── Makefile
 │   ├── confidence.py
+│   ├── cost_watch.py          # Built-in cost scheduler / live check
 │   ├── eval.py
 │   ├── graph.py               # LangGraph wiring
+│   ├── groundedness.py
 │   ├── hallucination_eval.py
+│   ├── llm.py                 # OpenAI-compatible client + guardrails
 │   ├── orchestrator.py
+│   ├── real_case.py
+│   ├── report.py              # Synthetic incident report
+│   ├── signatures.py          # Regex failure signatures
 │   ├── state.py               # Shared agent state
 │   ├── nodes/
 │   │   ├── observe.py         # Fetch logs / cluster state
@@ -128,43 +135,33 @@ devops-ai-agent/
 │   │   └── terraform.py       # Terraform error parser
 │   └── memory/
 │       ├── chroma.py          # Vector store init
-│       └── ingest.py          # Runbook + incident ingestion
+│       ├── ingest.py          # Runbook + incident ingestion
+│       └── retrieval.py       # Local (default) and Chroma retrievers
+├── product/                   # Commercial layer (separate license, see LICENSING.md)
 ├── data/
 │   ├── runbooks/              # Operational knowledge (RAG)
-│   │   ├── eks-oomkill.md
-│   │   ├── imagepullbackoff.md
-│   │   └── terraform-iam-deny.md
 │   ├── incidents/             # Historical incidents
-│   │   ├── 2024-11-eks-oom.json
-│   │   ├── 2024-12-tf-apply-fail.json
-│   │   └── 2025-01-ci-permission.json
 │   ├── logs/                  # Sample logs for local demo
-│   │   ├── kubernetes/
-│   │   │   └── payments-api.log
-│   │   └── github-actions/
-│   │       └── terraform-failure.log
-│   └── eval/                  # Evaluation datasets
-│       ├── golden_incidents.json
-│       └── expected_outputs.json
+│   ├── eval/                  # Golden set + real-incident set
+│   └── synthetic/             # Hand-written report dataset (never ingested)
+├── reports/                   # Generated synthetic incident report
+├── tests/
 ├── ui/
 │   └── cli.py                 # Interactive CLI
 ├── docs/
-│   ├── demo/
-│   │   ├── README.md
-│   │   ├── demo-script.md
-│   │   └── devops-agent-demo.gif
-│   ├── screenshots/
-│   │   ├── README.md
-│   │   ├── 01-incident-input.png
-│   │   ├── 02-agent-analysis.png
-│   │   ├── 03-root-cause.png
-│   │   ├── 04-confidence-score.png
-│   │   └── 05-terraform-failure.png
+│   ├── demo/                  # Demo script + GIF
+│   └── screenshots/
+├── .dockerignore
 ├── .env.example
 ├── .gitignore
+├── Dockerfile
+├── Dockerfile.product         # Commercial image (adds product/)
 ├── LICENSE
+├── LICENSING.md
 ├── Makefile
 ├── docker-compose.yml
+├── docker-compose.kube.yml    # Opt-in kubeconfig / AWS mounts for kubectl logs
+├── pytest.ini
 ├── requirements.txt
 └── README.md
 ```
@@ -348,28 +345,33 @@ Agent:
 
 * Docker + Docker Compose
 * kubectl configured (read-only is fine)
-* OpenAI API key (or local LLM)
+* Optional: OpenAI API key or a local OpenAI-compatible server (without one the agent runs in deterministic mode)
+* Optional: kubectl / AWS credentials (see `docker-compose.kube.yml`)
 
 ### 2️⃣ Clone & Configure
 
 ```bash
-git clone https://github.com/yourname/devops-ai-agent.git
-cd devops-ai-agent
+git clone <your-fork-or-repo-url> agentic-devops
+cd agentic-devops
 cp .env.example .env
 ```
 
 Edit `.env`:
 
 ```env
-OPENAI_API_KEY=sk-xxxx
+AGENT_API_KEY=...              # required for POST /analyze and /cost/check (python -c "import secrets; print(secrets.token_urlsafe(32))")
+OPENAI_API_KEY=sk-xxxx         # optional: enables LLM diagnosis
 GITHUB_TOKEN=github_pat_xxxx   # optional: read-only (Actions: read), enables CI log analysis
 ```
 
 ### 3️⃣ Run
 
 ```bash
-docker compose up --build
+docker compose up --build        # or: make up
 ```
+
+To let the agent run `kubectl logs` against your cluster, add the opt-in override:
+`docker compose -f docker-compose.yml -f docker-compose.kube.yml up --build`.
 
 API will be available at:
 
@@ -382,6 +384,7 @@ http://localhost:8000
 ## 💬 Using the CLI
 
 ```bash
+pip install -r requirements.txt
 python ui/cli.py
 ```
 
@@ -460,36 +463,9 @@ This allows it to say:
 
 ## 🧪 Evaluation & Hallucination Detection
 
-LLMs can hallucinate. This project **measures and limits that risk**.
-
-### Evaluation Metrics (MVP)
-
-| Metric          | Description                        |
-| --------------- | ---------------------------------- |
-| Tool Grounding  | % of answers backed by tool output |
-| Log Citation    | Did response reference real logs?  |
-| Confidence Flag | Warn if unsure                     |
-| Reproducibility | Same input → same diagnosis        |
-
-### Example Hallucination Guard
-
-```python
-if not observations:
-    return "⚠️ Insufficient data. Unable to diagnose safely."
-```
-
-### LLM Self-Check Prompt
-
-```
-If you are unsure or lack evidence, say so explicitly.
-Do NOT guess.
-```
-
-### Future Metrics
-
-* Golden incident test set
-* Human-in-the-loop validation
-* Precision / recall on known failures
+See [Evaluation & Safety](#-evaluation--safety) above for the golden set, real-incident set and groundedness checks
+(`make eval`, `make live-eval`). Open items: human-in-the-loop validation and precision/recall on real incidents
+(`data/eval/real/`).
 
 ---
 
@@ -515,11 +491,14 @@ Perfect as a **portfolio flagship** for:
 
 ## 🛣️ Roadmap
 
+* [x] Terraform failure parsing (IAM denial, expired credentials, state lock)
+* [x] Slack slash-command interface (`/slack/command`)
+* [x] Evaluation & hallucination metrics
+* [x] Multi-tenant product layer (open-core split)
 * [ ] Terraform drift analysis
 * [ ] Auto PR creation for fixes
-* [ ] Slack bot interface
 * [ ] Multi-agent (Observer / Diagnoser / Executor)
-* [ ] Evaluation & hallucination metrics
+* [ ] Human-in-the-loop validation
 
 ---
 
@@ -535,7 +514,7 @@ PRs welcome. Ideas especially encouraged around:
 
 ## 📄 License
 
-Apache License 2.0
+Apache License 2.0 for the open core; `product/` is under a separate commercial license. See [LICENSING.md](LICENSING.md).
 
 ---
 
