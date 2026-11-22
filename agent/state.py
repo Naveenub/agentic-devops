@@ -15,12 +15,14 @@ class AgentState(TypedDict, total=False):
     question: str
     kubernetes: dict          # optional: {"namespace": str, "pod": str}
     github: dict              # optional: {"repo": "owner/name", "run_id": "123456789"}; needs GITHUB_TOKEN
+    cost: dict                # optional: {"service": "EC2", "region": "us-east-1", "threshold": 2.0}; read-only Cost Explorer
     # observe
     observations: List[Observation]
+    cost_anomaly: dict        # analyze_cost_anomaly() result; only set when `cost` was supplied
     # diagnose
     category: str             # see agent.signatures; LLM_CATEGORY or "unknown" otherwise
     diagnosis: str
-    diagnosis_source: str     # "signature" (regex or terraform parser) | "signature+llm" | "llm" | "none"
+    diagnosis_source: str     # "signature" (regex, terraform parser or cost z-score) | "signature+llm" | "llm" | "none"
     evidence: List[str]
     terraform: dict           # parse_error() result; only set when it agrees with the category
     rag_sources: List[str]

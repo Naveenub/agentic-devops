@@ -549,3 +549,4 @@ Notes:
 * Default retriever is local/offline; set `AGENT_RETRIEVER=chroma` to use Chroma (`make ingest` first). Chroma's default embedder downloads a model on first use; set `CHROMA_EMBEDDER=hash` for a deterministic offline embedder.
 * `make eval` runs the golden-incident check and the unsupported-token check from `data/eval/` (offline).
 * `agent/tools/aws_costs.py` is a z-score check over read-only Cost Explorer data; it returns no verdict (`anomaly: None`) when data is missing.
+* Cost anomaly wiring: `POST /analyze` accepts `"cost": {"service": "EC2", "region": "us-east-1"}` (observe -> diagnose -> suggest; a spike becomes category `cost_anomaly`, no verdict is a flagged tool error). `POST /cost/check` with `{"service", "region", "threshold"?}` runs the same agent path and posts a Slack alert when z exceeds the threshold. Set `SLACK_BOT_TOKEN` and `SLACK_ALERT_CHANNEL`; the channel is never taken from the request.

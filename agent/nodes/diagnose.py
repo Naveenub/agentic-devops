@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from agent import llm
 from agent.memory.retrieval import Hit, retrieve
-from agent.signatures import CORROBORATING, DIAGNOSIS, TERRAFORM_CATEGORY, UNKNOWN, classify
+from agent.signatures import COST_ANOMALY, CORROBORATING, DIAGNOSIS, TERRAFORM_CATEGORY, UNKNOWN, classify
 from agent.state import LLM_CATEGORY, AgentState, real_observations
 from agent.tools.terraform import parse_error
 
@@ -102,6 +102,15 @@ def diagnose(state: AgentState) -> dict:
         tf = None
     if tf and tf["kind"] == "iam_denied" and tf["action"]:
         diagnosis += f' Denied action: {tf["action"]}' + (f' on {tf["resource"]}.' if tf["resource"] else ".")
+
+    # Cost z-score verdict (deterministic). A spike names the category; a clean verdict only
+    # replaces the misleading "no failure signature" text. No verdict (None) is ignored.
+    cost = state.get("cost_anomaly") or {}
+    if category == UNKNOWN and cost.get("anomaly") is not None:
+        diagnosis = cost["message"]
+        if cost["anomaly"]:
+            category = COST_ANOMALY
+            evidence.append(f'aws cost explorer: {cost["message"]}')
 
     use_llm = bool(obs) and llm.enabled()
     hits = retrieve(build_query(state), n=3) if (category != UNKNOWN or use_llm) else []

@@ -3,6 +3,7 @@ import re
 from typing import Optional, Tuple
 
 UNKNOWN = "unknown"
+COST_ANOMALY = "cost_anomaly"  # set by diagnose from the z-score verdict, not by a regex
 
 # Ordered: first match wins.
 SIGNATURES = [
@@ -43,6 +44,11 @@ SUGGESTIONS = {
     "state_lock": [
         "Read the Lock Info (ID, Who, Created) in the error to find the run holding the lock.",
         "Wait for that run to finish; if it is dead, a human decides whether to release the stale lock.",
+    ],
+    COST_ANOMALY: [
+        "Break the spike down by usage type and linked account in Cost Explorer to find the driver.",
+        "Check this service/region for recent deploys, scaled-up resources or runaway jobs.",
+        "Confirm with the owning team before changing anything; add a budget alert if it persists.",
     ],
     UNKNOWN: [
         "Collect more evidence (pod events, previous container logs, CI step output) and re-run.",
