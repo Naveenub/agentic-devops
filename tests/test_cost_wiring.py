@@ -80,3 +80,131 @@ def test_analyze_accepts_cost_input(api):
     _stub_costs(mp, SPIKE)
     r = client.post("/analyze", json={"question": "why is spend up?", "cost": {"service": "EC2", "region": "r"}}).json()
     assert "z=" in r["diagnosis"] and r["confidence"] > 0
+
+
+# ---- PagerDuty, Slack command, scheduler, Cost Explorer request shape ----
+
+import json  # noqa: E402
+import types  # noqa: E402
+
+from agent import cost_watch  # noqa: E402
+
+
+@pytest.fixture
+def pd(monkeypatch):
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append((req.full_url, json.loads(req.data)))
+        return types.SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr("agent.cost_watch.urllib.request.urlopen", fake_urlopen)
+    return calls
+
+
+def test_pagerduty_trigger_is_deduped_and_valid_json_even_for_infinite_z(api, pd):
+    client, _, mp = api
+    mp.setenv("PAGERDUTY_ROUTING_KEY", "rk")
+    _stub_costs(mp, [100.0] * 8 + [400.0])  # zero stdev -> z = inf
+    body = client.post("/cost/check", json={"service": "EC2", "region": "r"}).json()
+    url, sent = pd[0]
+    assert body["paged"] is True and url == cost_watch.PD_URL
+    assert sent["event_action"] == "trigger" and sent["routing_key"] == "rk"
+    assert sent["dedup_key"].endswith(":r") and sent["payload"]["custom_details"]["z_score"] == "inf"
+
+
+def test_pagerduty_failure_does_not_block_slack_alert(api, monkeypatch):
+    client, sent, mp = api
+    mp.setenv("PAGERDUTY_ROUTING_KEY", "rk")
+    mp.setattr("agent.cost_watch.urllib.request.urlopen", lambda *a, **k: (_ for _ in ()).throw(OSError("down")))
+    _stub_costs(mp, SPIKE)
+    body = client.post("/cost/check", json={"service": "EC2", "region": "r"}).json()
+    assert body["alerted"] is True and body["paged"] is False and "down" in body["page_error"]
+
+
+def test_no_pagerduty_call_without_key_or_without_spike(api, pd):
+    client, _, mp = api
+    _stub_costs(mp, SPIKE)
+    client.post("/cost/check", json={"service": "EC2", "region": "r"})
+    mp.setenv("PAGERDUTY_ROUTING_KEY", "rk")
+    _stub_costs(mp, STEADY)
+    client.post("/cost/check", json={"service": "EC2", "region": "r"})
+    assert pd == []
+
+
+def test_short_service_names_resolve_to_cost_explorer_names(api):
+    client, _, mp = api
+    seen = []
+    mp.setattr("agent.tools.aws_costs.fetch_daily_costs", lambda s, r, *a, **k: seen.append(s) or STEADY)
+    client.post("/cost/check", json={"service": "EC2", "region": "r"})
+    assert seen == ["Amazon Elastic Compute Cloud - Compute"]
+
+
+def test_slack_command_cost_replies_without_alerting(api):
+    client, sent, mp = api
+    _stub_costs(mp, SPIKE)
+    client.post("/slack/command", json={"text": "cost ec2 us-east-1", "channel_id": "C9"})
+    assert [c for c, _ in sent] == ["C9"] and "z=" in sent[0][1] and "Suggested" in sent[0][1]
+    client.post("/slack/command", json={"text": "cost ec2", "channel_id": "C9"})
+    assert "Usage" in sent[1][1]
+
+
+def test_slack_command_still_diagnoses_other_text(api):
+    client, sent, _ = api
+    client.post("/slack/command", json={"text": "pod exit code 137", "channel_id": "C9"})
+    assert "*Diagnosis:*" in sent[0][1]
+
+
+def test_parse_watch():
+    assert cost_watch.parse_watch(" EC2:us-east-1 ; Amazon X - Y:eu-west-1;") == [
+        ("EC2", "us-east-1"), ("Amazon X - Y", "eu-west-1")]
+    assert cost_watch.parse_watch(None) == []
+    with pytest.raises(ValueError):
+        cost_watch.parse_watch("EC2")
+
+
+def test_scheduler_respects_cooldown_and_resets_when_clean(api):
+    _, sent, mp = api
+    watch, last = [("EC2", "r")], {}
+    _stub_costs(mp, SPIKE)
+    cost_watch.run_watch_once(watch, last, cooldown=100, now=0)
+    cost_watch.run_watch_once(watch, last, cooldown=100, now=50)    # inside cooldown: quiet
+    assert len(sent) == 1
+    cost_watch.run_watch_once(watch, last, cooldown=100, now=150)   # cooldown over: re-alert
+    assert len(sent) == 2
+    _stub_costs(mp, STEADY)
+    cost_watch.run_watch_once(watch, last, cooldown=100, now=160)   # clean verdict resets
+    _stub_costs(mp, SPIKE)
+    cost_watch.run_watch_once(watch, last, cooldown=100, now=170)   # new spike alerts at once
+    assert len(sent) == 3
+
+
+def test_scheduler_survives_a_failing_check(api):
+    _, sent, mp = api
+
+    def boom(s, r, *a, **k):
+        if s == "bad":
+            raise RuntimeError("x")
+        return SPIKE
+
+    mp.setattr("agent.tools.aws_costs.fetch_daily_costs", boom)
+    out = cost_watch.run_watch_once([("bad", "r"), ("EC2", "r")], {}, cooldown=0, now=0)
+    assert len(out) == 1 and len(sent) == 1
+
+
+def test_cost_explorer_request_matches_the_real_api_model(monkeypatch):
+    """boto3's Stubber validates our request against the real Cost Explorer service model (no network)."""
+    boto3 = pytest.importorskip("boto3")
+    from botocore.stub import Stubber
+
+    from agent.tools.aws_costs import fetch_daily_costs
+
+    for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        monkeypatch.setenv(k, "test")
+    ce = boto3.client("ce", region_name="us-east-1")
+    day = {"TimePeriod": {"Start": "2026-01-01", "End": "2026-01-02"}, "Estimated": False, "Groups": [],
+           "Total": {"UnblendedCost": {"Amount": "1.5", "Unit": "USD"}}}
+    with Stubber(ce) as stub:
+        stub.add_response("get_cost_and_usage", {"ResultsByTime": [day]})
+        assert fetch_daily_costs("AWS Lambda", "us-east-1", client=ce) == [1.5]
+        stub.assert_no_pending_responses()

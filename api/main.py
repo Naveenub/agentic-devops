@@ -1,10 +1,26 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI, HTTPException
 
+from agent.cost_watch import check_cost, parse_watch, watch_forever
 from agent.graph import build_graph
 
-app = FastAPI(title="DevOps AI Agent")
+
+@asynccontextmanager
+async def lifespan(_app):
+    """Start the cost scheduler only when COST_WATCH lists something to watch."""
+    watch = parse_watch(os.getenv("COST_WATCH"))
+    task = asyncio.create_task(watch_forever(
+        watch, float(os.getenv("COST_CHECK_INTERVAL_SECONDS", "21600")),
+        float(os.getenv("COST_ALERT_COOLDOWN_SECONDS", "86400")))) if watch else None
+    yield
+    if task:
+        task.cancel()
+
+
+app = FastAPI(title="DevOps AI Agent", lifespan=lifespan)
 router = APIRouter()
 graph = build_graph()
 
@@ -33,41 +49,32 @@ def analyze(payload: dict):
 
 @app.post("/cost/check")
 def cost_check(payload: dict):
-    """Run the agent on one service/region's daily spend; alert Slack on a z-score spike.
-    The alert channel comes from SLACK_ALERT_CHANNEL only (never from the request)."""
+    """Run the agent on one service/region's daily spend; alert on a z-score spike.
+    Alert targets come from SLACK_ALERT_CHANNEL / PAGERDUTY_ROUTING_KEY only, never the request."""
     service, region = payload.get("service"), payload.get("region")
     if not service or not region:
         raise HTTPException(status_code=422, detail="'service' and 'region' are required")
     try:
-        cost = {"service": service, "region": region, "threshold": float(payload.get("threshold", 2.0))}
+        threshold = float(payload.get("threshold", 2.0))
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="'threshold' must be a number")
-
-    result = _run(f"Cost check: {service} in {region}", {"cost": cost})
-    anomaly = result["cost_anomaly"]
-    response = {"cost_anomaly": anomaly, "diagnosis": result["diagnosis"],
-                "suggestions": result["suggestions"], "alerted": False}
-
-    channel = os.getenv("SLACK_ALERT_CHANNEL")
-    if anomaly["anomaly"] is True and channel:
-        from agent.tools.slack import send_message  # lazy: slack_sdk only needed here
-
-        try:
-            send_message(
-                channel,
-                f":rotating_light: *Cost anomaly* - {anomaly['message']}\n"
-                f"*Latest:* {anomaly['latest']} vs mean {anomaly['mean']}\n"
-                f"*Suggested:* {result['suggestions'][0]}",
-            )
-            response["alerted"] = True
-        except Exception as e:  # detection succeeded; don't lose it because Slack failed
-            response["alert_error"] = str(e)
-    return response
+    return check_cost(service, region, threshold)
 
 
 @router.post("/slack/command")
 async def slack_command(payload: dict):
     from agent.tools.slack import send_message  # lazy: slack_sdk only needed here
+
+    tokens = payload["text"].split()
+    if tokens and tokens[0].lower() == "cost":  # `cost <service> <region>`, e.g. `cost ec2 us-east-1`
+        if len(tokens) < 3:
+            send_message(payload["channel_id"], "Usage: `cost <service> <region>` e.g. `cost ec2 us-east-1`")
+        else:
+            r = check_cost(" ".join(tokens[1:-1]), tokens[-1], notify=False)
+            a = r["cost_anomaly"]
+            send_message(payload["channel_id"], f"*Cost:* {a['message']}"
+                         + (f"\n*Suggested:* {r['suggestions'][0]}" if a["anomaly"] else ""))
+        return {"ok": True}
 
     result = _run(payload["text"])
     send_message(
