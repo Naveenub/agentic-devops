@@ -372,6 +372,21 @@ def test_failed_payment_downgrades_immediately_and_retry_success_restores(stripe
     assert store.get_tenant(t["id"])["plan"] == "free"
 
 
+def test_failed_payment_reads_new_api_invoice_shape(stripe_env):
+    c, mp, *_ = stripe_env
+    t = _tenant(c)
+    store.update_tenant(t["id"], stripe_customer_id="cus_1")
+    _hook(c, _sub(t["id"], "cus_1"))
+    inv = lambda sid, i: {"id": f"evt_new{i}", "type": "invoice.payment_failed",
+                          "data": {"object": {"customer": "cus_1", "next_payment_attempt": 1900000000,
+                                              "parent": {"subscription_details": {"subscription": sid}}}}}
+    _hook(c, inv("sub_other", 1))  # an unrelated subscription's invoice must not touch the tenant
+    assert store.get_tenant(t["id"])["plan"] == "pro"
+    _hook(c, inv("sub_1", 2))
+    got = store.get_tenant(t["id"])
+    assert (got["plan"], got["subscription_status"], got["stripe_subscription_id"]) == ("free", "past_due", "sub_1")
+
+
 def test_webhook_is_idempotent_and_stale_old_subscription_cannot_downgrade(stripe_env):
     c, mp, *_ = stripe_env
     t = _tenant(c)

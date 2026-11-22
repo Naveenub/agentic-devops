@@ -267,6 +267,19 @@ def _downgrade(t: dict, status: str) -> None:
     store.clear_subscription(t["id"], status)
 
 
+def _invoice_subscription(inv: dict) -> str | None:
+    """Subscription id of an invoice. Older Stripe API versions put it at `subscription`; newer ones
+    (2025-03-31 and later) at `parent.subscription_details.subscription`."""
+    sid = inv.get("subscription")
+    if isinstance(sid, dict):
+        sid = sid.get("id")
+    if sid:
+        return sid
+    details = ((inv.get("parent") or {}).get("subscription_details") or {})
+    sid = details.get("subscription")
+    return sid.get("id") if isinstance(sid, dict) else sid
+
+
 def handle_event(event: dict) -> str:
     """Apply one verified event. Returns 'duplicate', 'ignored' or 'handled'. Raises on failure so the
     caller answers 5xx and Stripe retries; the event id is only recorded once it has been applied."""
@@ -295,7 +308,7 @@ def handle_event(event: dict) -> str:
         result = "handled"
     elif typ == "invoice.payment_failed":
         t = _tenant_for(obj)
-        if t and obj.get("subscription") in (None, t.get("stripe_subscription_id")):
+        if t and _invoice_subscription(obj) in (None, t.get("stripe_subscription_id")):
             if obj.get("next_payment_attempt") is None:  # Stripe has given up retrying
                 _downgrade(t, "unpaid")
             else:  # downgrade now, keep the subscription: a successful retry re-upgrades via subscription.updated
