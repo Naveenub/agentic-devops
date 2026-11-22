@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -7,7 +9,12 @@ from product import billing, mailer, plans as plans_mod, store, subscriptions
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    monkeypatch.setenv("PRODUCT_DB", str(tmp_path / "p.db"))
+    pg = os.getenv("TEST_POSTGRES_URL")  # set it to run this whole file against PostgreSQL instead of SQLite
+    monkeypatch.setenv("PRODUCT_DB", pg or str(tmp_path / "p.db"))
+    if pg:
+        with store.conn() as db:
+            db.execute("TRUNCATE tenants, stripe_events, api_keys, usage, rate_hits, slack_links, signup_hits, "
+                       "recover_hits, recovery_tokens, job_runs RESTART IDENTITY CASCADE")
     monkeypatch.setenv("PRODUCT_ADMIN_KEY", "adm")
     monkeypatch.setenv("AGENT_LLM", "off")
     monkeypatch.setenv("PRODUCT_SIGNUP", "on")  # signup is closed unless opened; most tests need it open

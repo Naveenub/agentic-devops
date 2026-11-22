@@ -5,5 +5,6 @@ FROM ${BASE}
 USER root
 RUN mkdir -p /data/product && chown app:app /data/product
 COPY --chown=app:app product/ product/
+RUN pip install --no-cache-dir -r product/requirements.txt  # PostgreSQL driver
 USER app
 ENV PRODUCT_DB=/data/product/product.db

@@ -17,14 +17,25 @@ from agent.graph import build_graph
 
 @asynccontextmanager
 async def lifespan(_app):
-    """Start the cost scheduler only when COST_WATCH lists something to watch."""
+    """Start the cost scheduler only when COST_WATCH lists something to watch, and the billing scheduler only when
+    the product layer is on and PRODUCT_BILLING_INTERVAL is set."""
     watch = parse_watch(os.getenv("COST_WATCH"))
     task = asyncio.create_task(watch_forever(
         watch, float(os.getenv("COST_CHECK_INTERVAL_SECONDS", "21600")),
         float(os.getenv("COST_ALERT_COOLDOWN_SECONDS", "86400")))) if watch else None
+    billing_task = None
+    if product_enabled():  # commercial layer only; PRODUCT_BILLING_INTERVAL unset = no scheduler (use cron)
+        try:
+            from product.scheduler import billing_forever, interval
+        except ImportError:
+            pass
+        else:
+            if interval():
+                billing_task = asyncio.create_task(billing_forever(interval()))
     yield
-    if task:
-        task.cancel()
+    for t in (task, billing_task):
+        if t:
+            t.cancel()
 
 
 # Schema/docs routes are off: they would publish the API surface unauthenticated.

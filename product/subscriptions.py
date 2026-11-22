@@ -227,7 +227,8 @@ def handle_event(event: dict) -> str:
     else:
         return "ignored"
     with store.conn() as c:
-        c.execute("INSERT OR IGNORE INTO stripe_events(id,type,received_at) VALUES(?,?,?)", (eid, typ, time.time()))
+        c.execute("INSERT INTO stripe_events(id,type,received_at) VALUES(?,?,?) ON CONFLICT DO NOTHING",
+                  (eid, typ, time.time()))
     return result
 
 

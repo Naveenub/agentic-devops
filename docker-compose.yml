@@ -11,7 +11,8 @@ services:
       - chroma-data:/data/chroma
       # Commercial layer (see LICENSING.md): build with `make image-product`, set `image:` to
       # agentic-devops-product instead of `build: .`, set PRODUCT_DB=/data/product/product.db in .env,
-      # and persist the database:
+      # and persist the database (SQLite, one api container). To run several api replicas, point PRODUCT_DB at
+      # a postgresql:// URL instead and drop this volume; set PRODUCT_BILLING_INTERVAL for the built-in billing report.
       # - product-data:/data/product
 
 volumes:

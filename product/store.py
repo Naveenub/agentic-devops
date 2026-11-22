@@ -1,10 +1,18 @@
-"""SQLite store: tenants, hashed API keys, usage events. Stdlib only, one connection per call.
+"""Store: tenants, hashed API keys, usage events, rate limits.
+
+Two backends, chosen by PRODUCT_DB:
+  /data/product.db                     SQLite (stdlib only, one connection per call). One node: fine for
+                                       validation and a single replica, not for scaling out.
+  postgresql://user:pw@host:5432/db    PostgreSQL (needs `pip install -r product/requirements.txt`). Safe to share
+                                       between replicas: quotas, rate limits, signup limits and the billing
+                                       schedule all live in the database.
 API keys are random 256-bit tokens, so a plain SHA-256 digest is sufficient (no password stretching)."""
 import hashlib
 import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -33,7 +41,13 @@ CREATE TABLE IF NOT EXISTS recovery_tokens (
   token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
   created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
 CREATE INDEX IF NOT EXISTS recovery_tokens_tenant ON recovery_tokens(tenant_id, created_at);
+CREATE TABLE IF NOT EXISTS job_runs (name TEXT PRIMARY KEY, last_run REAL NOT NULL);
 """
+# PostgreSQL flavour of the same schema: 64-bit ids and counters, double-precision epoch seconds.
+PG_SCHEMA = (re.sub(r"\bREAL\b", "DOUBLE PRECISION",
+                    SCHEMA.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+                    .replace("quantity INTEGER", "quantity BIGINT"))
+             + "CREATE UNIQUE INDEX IF NOT EXISTS tenants_email_uq ON tenants(email);\n")
 
 RECOVERY_TTL = 1800  # seconds a recovery link stays valid
 RECOVERY_COOLDOWN = 600  # at most one recovery email per tenant in this window (stops mailbombing a registered address)
@@ -54,12 +68,32 @@ def clean_email(value) -> str:
     return email
 
 
+try:
+    import psycopg
+    INTEGRITY_ERRORS: tuple = (sqlite3.IntegrityError, psycopg.IntegrityError)
+except ImportError:  # SQLite-only install
+    psycopg = None
+    INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+
+
 def db_path() -> str:
     return os.environ["PRODUCT_DB"]
 
 
+def is_postgres(url: str | None = None) -> bool:
+    return (url or db_path()).startswith(("postgres://", "postgresql://"))
+
+
+def month_sql(col: str) -> str:
+    """'YYYY-MM' (UTC) of an epoch-seconds column, in the active dialect."""
+    if is_postgres():
+        return f"to_char(to_timestamp({col}) AT TIME ZONE 'UTC', 'YYYY-MM')"
+    return f"strftime('%Y-%m', {col}, 'unixepoch')"
+
+
 def _migrate(c) -> None:
-    """Databases created before the Stripe lifecycle / key recovery lack these tenant columns."""
+    """Databases created before the Stripe lifecycle / key recovery lack these tenant columns (SQLite only;
+    PostgreSQL databases are created from the current schema)."""
     have = {r[1] for r in c.execute("PRAGMA table_info(tenants)")}
     for col in ("stripe_subscription_id", "subscription_status", "email"):
         if col not in have:
@@ -71,10 +105,80 @@ def _migrate(c) -> None:
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS tenants_email_uq ON tenants(email)")
 
 
+class _Row:
+    """Row that reads like sqlite3.Row: r["name"], r[0], dict(r)."""
+    __slots__ = ("_names", "_vals")
+
+    def __init__(self, names, vals):
+        self._names, self._vals = names, vals
+
+    def __getitem__(self, k):
+        return self._vals[k if isinstance(k, int) else self._names.index(k)]
+
+    def __iter__(self):
+        return iter(self._vals)
+
+    def keys(self):
+        return list(self._names)
+
+
+def _row_factory(cursor):
+    names = [d.name for d in (cursor.description or ())]
+    return lambda vals: _Row(names, vals)
+
+
+class _PgConn:
+    """The slice of the sqlite3 connection API the store uses, over a pooled psycopg connection."""
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def execute(self, sql: str, params=()):
+        return self._raw.execute(sql.replace("%", "%%").replace("?", "%s"), params)
+
+
+_pools: dict = {}
+_pools_lock = threading.Lock()
+
+
+def _pg_pool(url: str):
+    """One pool per process (created lazily, so it is safe with forked workers); the schema is applied once."""
+    with _pools_lock:
+        if url not in _pools:
+            if psycopg is None:
+                raise RuntimeError("PostgreSQL needs psycopg: pip install -r product/requirements.txt")
+            from psycopg_pool import ConnectionPool
+            pool = ConnectionPool(url, min_size=1, max_size=int(os.getenv("PRODUCT_DB_POOL_MAX", "10")),
+                                  kwargs={"row_factory": _row_factory}, open=False)
+            pool.open(wait=True, timeout=30)
+            with pool.connection() as raw:  # serialise concurrent first starts of several replicas
+                raw.execute("SELECT pg_advisory_xact_lock(hashtext('product-schema'))")
+                raw.execute(PG_SCHEMA)
+            _pools[url] = pool
+        return _pools[url]
+
+
+def close_pools() -> None:
+    """Close every PostgreSQL pool (shutdown, or tests that switch databases)."""
+    with _pools_lock:
+        for pool in _pools.values():
+            pool.close()
+        _pools.clear()
+
+
 @contextmanager
-def conn(immediate: bool = False):
-    """immediate=True takes the write lock up front, so read-then-write sequences are atomic across processes."""
-    c = sqlite3.connect(db_path(), timeout=10)
+def conn(immediate: bool = False, lock: str | None = None):
+    """immediate=True makes read-then-write sequences atomic across processes. SQLite takes the database write
+    lock up front; PostgreSQL takes a transaction-scoped advisory lock on `lock` (default: one global lock), so
+    callers that are independent per tenant pass the tenant id and do not queue behind each other."""
+    url = db_path()
+    if is_postgres(url):
+        with _pg_pool(url).connection() as raw:  # commits on success, rolls back on error
+            if immediate:
+                raw.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (lock or "product-db",))
+            yield _PgConn(raw)
+        return
+    c = sqlite3.connect(url, timeout=10)
     c.row_factory = sqlite3.Row
     try:
         c.executescript(SCHEMA)
@@ -105,7 +209,7 @@ def create_tenant(name: str, plan: str = "free", email: str | None = None) -> di
         with conn() as c:
             c.execute("INSERT INTO tenants(id,name,plan,created_at,email) VALUES(?,?,?,?,?)",
                       (tid, name, plan, time.time(), email))
-    except sqlite3.IntegrityError:  # the only unique column besides the random id is email
+    except INTEGRITY_ERRORS:  # the only unique column besides the random id is email
         raise EmailTaken(email)
     return {"id": tid, "name": name, "plan": plan, **({"email": email} if email else {})}
 
@@ -166,7 +270,7 @@ def start_recovery(tid: str) -> str | None:
     one was already issued within RECOVERY_COOLDOWN. A new token replaces the tenant's older ones."""
     now = time.time()
     token = secrets.token_urlsafe(32)
-    with conn(immediate=True) as c:
+    with conn(immediate=True, lock=f"recovery:{tid}") as c:
         if c.execute("SELECT 1 FROM recovery_tokens WHERE tenant_id=? AND created_at>?",
                      (tid, now - RECOVERY_COOLDOWN)).fetchone():
             return None
@@ -180,7 +284,7 @@ def redeem_recovery(token: str) -> tuple[dict, str] | None:
     """Spend a recovery token: revoke every key the tenant has and issue one new key, atomically.
     Returns (tenant, plaintext key), or None if the token is unknown, used, expired or the tenant is inactive."""
     now = time.time()
-    with conn(immediate=True) as c:
+    with conn(immediate=True, lock="recovery-redeem:" + hash_key(token)) as c:
         r = c.execute("SELECT r.tenant_id FROM recovery_tokens r JOIN tenants t ON t.id=r.tenant_id "
                       "WHERE r.token_hash=? AND r.used_at IS NULL AND r.expires_at>? AND t.active=1",
                       (hash_key(token), now)).fetchone()
@@ -222,15 +326,15 @@ def reserve(tid: str, event: str, quantity: int, check) -> int:
     """Atomic check-and-record: under the write lock, `check(used_this_month)` returns a refusal reason or None;
     if None the usage row is inserted in the same transaction and its id returned (pass it to `release` if the
     work fails). Raises QuotaRefused(reason) otherwise. Concurrent requests can no longer overshoot a limit."""
-    with conn(immediate=True) as c:
+    with conn(immediate=True, lock=f"usage:{tid}") as c:
         now = time.time()
-        rows = c.execute("SELECT event, SUM(quantity) q FROM usage WHERE tenant_id=? AND ts>=? GROUP BY event",
-                         (tid, month_start(now))).fetchall()
+        rows = c.execute("SELECT event, CAST(SUM(quantity) AS BIGINT) q FROM usage WHERE tenant_id=? AND ts>=? "
+                         "GROUP BY event", (tid, month_start(now))).fetchall()
         reason = check({r["event"]: r["q"] for r in rows})
         if reason:
             raise QuotaRefused(reason)
-        return c.execute("INSERT INTO usage(tenant_id,event,quantity,ts) VALUES(?,?,?,?)",
-                         (tid, event, quantity, now)).lastrowid
+        return c.execute("INSERT INTO usage(tenant_id,event,quantity,ts) VALUES(?,?,?,?) RETURNING id",
+                         (tid, event, quantity, now)).fetchall()[0][0]
 
 
 def release(row_id: int) -> None:
@@ -241,8 +345,8 @@ def release(row_id: int) -> None:
 
 def usage_since(tid: str, since: float) -> dict:
     with conn() as c:
-        rows = c.execute("SELECT event, SUM(quantity) q FROM usage WHERE tenant_id=? AND ts>=? GROUP BY event",
-                         (tid, since)).fetchall()
+        rows = c.execute("SELECT event, CAST(SUM(quantity) AS BIGINT) q FROM usage WHERE tenant_id=? AND ts>=? "
+                         "GROUP BY event", (tid, since)).fetchall()
     return {r["event"]: r["q"] for r in rows}
 
 
@@ -250,7 +354,7 @@ def rate_hit(tid: str, limit: int, window: float = 60.0) -> bool:
     """Sliding-window limiter shared by every worker/process on this DB. Records the hit and returns True
     if under `limit` requests in the last `window` seconds; a refused request is not recorded."""
     now = time.time()
-    with conn(immediate=True) as c:
+    with conn(immediate=True, lock=f"rate:{tid}") as c:
         c.execute("DELETE FROM rate_hits WHERE tenant_id=? AND ts<=?", (tid, now - window))
         if c.execute("SELECT COUNT(*) FROM rate_hits WHERE tenant_id=?", (tid,)).fetchone()[0] >= limit:
             return False
@@ -260,7 +364,7 @@ def rate_hit(tid: str, limit: int, window: float = 60.0) -> bool:
 
 def _hit(table: str, ip: str, per_ip_hour: int, per_day: int) -> bool:
     now = time.time()
-    with conn(immediate=True) as c:  # `table` is always one of our own constants, never user input
+    with conn(immediate=True, lock=table) as c:  # `table` is always one of our own constants, never user input
         c.execute(f"DELETE FROM {table} WHERE ts<=?", (now - 86400,))
         if c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] >= per_day:
             return False
@@ -284,7 +388,8 @@ def recover_hit(ip: str, per_ip_hour: int, per_day: int) -> bool:
 def link_slack(tid: str, team_id: str) -> None:
     """Map a Slack workspace (the slash command's team_id) to a tenant; re-linking moves it."""
     with conn() as c:
-        c.execute("INSERT OR REPLACE INTO slack_links(team_id,tenant_id) VALUES(?,?)", (team_id, tid))
+        c.execute("INSERT INTO slack_links(team_id,tenant_id) VALUES(?,?) "
+                  "ON CONFLICT(team_id) DO UPDATE SET tenant_id=excluded.tenant_id", (team_id, tid))
 
 
 def unlink_slack(tid: str, team_id: str) -> int:
@@ -299,3 +404,17 @@ def tenant_for_slack(team_id: str | None) -> dict | None:
         r = c.execute("SELECT t.* FROM slack_links l JOIN tenants t ON t.id=l.tenant_id "
                       "WHERE l.team_id=? AND t.active=1", (team_id,)).fetchone()
     return dict(r) if r else None
+
+
+def claim_run(name: str, interval: float) -> bool:
+    """True if this caller should run the periodic job `name` now: nobody has run it in the last `interval`
+    seconds. The claim is atomic, so with several replicas (or workers) sharing this database exactly one of
+    them runs the job per interval."""
+    now = time.time()
+    with conn(immediate=True, lock=f"job:{name}") as c:
+        r = c.execute("SELECT last_run FROM job_runs WHERE name=?", (name,)).fetchone()
+        if r and now - r["last_run"] < interval:
+            return False
+        c.execute("INSERT INTO job_runs(name,last_run) VALUES(?,?) "
+                  "ON CONFLICT(name) DO UPDATE SET last_run=excluded.last_run", (name, now))
+        return True

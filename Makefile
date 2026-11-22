@@ -1,4 +1,4 @@
-.PHONY: help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync
+.PHONY: help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync billing-report
 
 help:
 	@echo "Targets: test eval live-eval report report-check ingest up image image-product"
@@ -29,6 +29,11 @@ stripe-check:
 
 stripe-sync:
 	python -m product.stripe_sync --apply
+
+# One Stripe usage report now (needs PRODUCT_DB and STRIPE_*). Not needed when PRODUCT_BILLING_INTERVAL is set;
+# use it from cron / a Kubernetes CronJob if you would rather schedule it outside the API. Exit 1 if a batch failed.
+billing-report:
+	python -m product.billing
 
 # Open-core API on http://localhost:8000
 up:
