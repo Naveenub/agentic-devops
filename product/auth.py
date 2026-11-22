@@ -37,3 +37,10 @@ def allowed_inputs(tenant: dict) -> set:
     """Inputs that use the server's own credentials are off unless the plan grants shared_tools:
     otherwise one tenant could read another's cluster, CI runs or AWS spend."""
     return {"kubernetes", "github", "cost"} if get_plan(tenant["plan"]).shared_tools else set()
+
+
+def can_cost_check(tenant: dict) -> bool:
+    """/cost/check and Slack `cost ...` read the operator's AWS Cost Explorer (about $0.01 per call).
+    Allowed by the narrow `cost_checks` flag, so it does not also unlock the server's kubectl/GitHub."""
+    plan = get_plan(tenant["plan"])
+    return plan.cost_checks or plan.shared_tools

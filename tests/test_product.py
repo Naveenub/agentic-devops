@@ -125,12 +125,25 @@ def test_shared_credential_inputs_blocked_without_plan_grant(env):
     t = _tenant(c)
     for extra in ({"kubernetes": {"pod": "p"}}, {"github": {"repo": "o/r", "run_id": "1"}}, {"cost": {"service": "EC2"}}):
         assert _ask(c, t["api_key"], **extra).status_code == 403
-    s = _tenant(c, "starter", "s")  # free has no cost_check quota at all; starter has quota but no shared tools
-    assert c.post("/cost/check", json={"service": "ec2", "region": "us-east-1"},
-                  headers={"x-api-key": s["api_key"]}).status_code == 403
+    s = _tenant(c, "starter", "s")  # starter may cost-check but gets no kubectl/GitHub
+    assert _ask(c, s["api_key"], kubernetes={"pod": "p"}).status_code == 403
+    assert _ask(c, s["api_key"], cost={"service": "EC2"}).status_code == 403
     assert _ask(c, t["api_key"], logs="Error: OOMKilled exit code 137").status_code == 200
     mp.setenv("PRODUCT_PLANS", '{"free": {"shared_tools": true}}')
     assert _ask(c, t["api_key"], cost={"service": "EC2", "region": "r", "daily_costs": [1.0] * 14 + [50.0]}).status_code == 200
+
+
+def test_cost_check_plan_grants(env):
+    c, mp = env
+    body = {"service": "ec2", "region": "us-east-1"}
+    mp.setattr("api.main.check_cost", lambda *a, **k: {"cost_anomaly": {"anomaly": False, "message": "ok"}})
+    for plan, code in (("free", 429), ("starter", 200), ("pro", 200), ("enterprise", 200)):
+        t = _tenant(c, plan, plan)
+        assert c.post("/cost/check", json=body, headers={"x-api-key": t["api_key"]}).status_code == code
+    mp.setenv("PRODUCT_PLANS", '{"free": {"cost_checks": true, "monthly_quota": {"cost_check": 5}}, "pro": {"cost_checks": false}}')
+    f, p = _tenant(c, "free", "f2"), _tenant(c, "pro", "p2")
+    assert c.post("/cost/check", json=body, headers={"x-api-key": f["api_key"]}).status_code == 200
+    assert c.post("/cost/check", json=body, headers={"x-api-key": p["api_key"]}).status_code == 403
 
 
 def test_unknown_plan_rejected(env):

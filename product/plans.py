@@ -13,6 +13,7 @@ class Plan:
     monthly_quota: dict  # event -> included units per calendar month (UTC); None = unlimited
     rate_per_minute: int  # requests per minute per tenant
     shared_tools: bool = False  # may use the server's kubectl/GitHub/AWS credentials (single-org deployments)
+    cost_checks: bool = False  # may call /cost/check (and Slack `cost ...`): one operator-paid Cost Explorer call each
     hard_limit: bool = False  # True: 429 at the quota. False: usage past the quota is billed as overage
     price_label: str = ""  # shown on /pricing only (e.g. "$49 / month"); the real price lives in Stripe
 
@@ -20,9 +21,12 @@ class Plan:
 PLANS = {
     "free": Plan("free", {"analyze": 50, "cost_check": 0, "llm_tokens": 100_000}, 10, hard_limit=True,
                  price_label="$0"),
-    "starter": Plan("starter", {"analyze": 1_000, "cost_check": 100, "llm_tokens": 2_000_000}, 60),
-    "pro": Plan("pro", {"analyze": 10_000, "cost_check": 1_000, "llm_tokens": 20_000_000}, 300),
-    "enterprise": Plan("enterprise", {"analyze": None, "cost_check": None, "llm_tokens": None}, 1_000),
+    "starter": Plan("starter", {"analyze": 1_000, "cost_check": 100, "llm_tokens": 2_000_000}, 60,
+                    cost_checks=True),
+    "pro": Plan("pro", {"analyze": 10_000, "cost_check": 1_000, "llm_tokens": 20_000_000}, 300,
+                cost_checks=True),
+    "enterprise": Plan("enterprise", {"analyze": None, "cost_check": None, "llm_tokens": None}, 1_000,
+                       cost_checks=True),
 }
 
 
@@ -37,6 +41,7 @@ def _load() -> dict:
         plans[name] = replace(base, monthly_quota=quota,
                               rate_per_minute=cfg.get("rate_per_minute", base.rate_per_minute),
                               shared_tools=cfg.get("shared_tools", base.shared_tools),
+                              cost_checks=cfg.get("cost_checks", base.cost_checks),
                               hard_limit=cfg.get("hard_limit", base.hard_limit),
                               price_label=str(cfg.get("price_label", base.price_label)))
     return plans

@@ -84,6 +84,15 @@ def _gate_shared_tools(tenant: dict | None, payload: dict) -> None:
         raise HTTPException(status_code=403, detail=f"inputs not available on plan '{tenant['plan']}': {sorted(denied)}")
 
 
+def _gate_cost_check(tenant: dict | None) -> None:
+    if tenant is None:
+        return
+    from product.auth import can_cost_check
+
+    if not can_cost_check(tenant):
+        raise HTTPException(status_code=403, detail=f"cost checks not available on plan '{tenant['plan']}'")
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
@@ -127,8 +136,7 @@ def cost_check(payload: dict, tenant: dict | None = Depends(_auth("cost_check"))
         threshold = float(payload.get("threshold", 2.0))
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="'threshold' must be a number")
-    if tenant:  # reads the operator's AWS account and posts to the operator's Slack/PagerDuty
-        _gate_shared_tools(tenant, {"cost": True})
+    _gate_cost_check(tenant)  # reads the operator's AWS account and posts to the operator's Slack/PagerDuty
     result = check_cost(service, region, threshold)
     if tenant:
         from product.metering import record
@@ -171,7 +179,7 @@ def _slack_tenant(payload: dict) -> tuple[dict | None, str | None]:
         metering.check_rate(tenant)
         metering.check_quota(tenant, event)
         if event == "cost_check":  # reads the operator's AWS account
-            _gate_shared_tools(tenant, {"cost": True})
+            _gate_cost_check(tenant)
     except HTTPException as e:
         return None, str(e.detail)
     return tenant, None
