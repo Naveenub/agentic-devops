@@ -5,6 +5,24 @@ Put **real, sanitized** incidents here as `data/eval/real/*.json` (each file is 
 Until this directory has cases, eval passing is **not** evidence of real-world accuracy
 (`python -m agent.eval --min-real 20` makes CI fail until it does).
 
+## Adding a case
+
+```bash
+python -m agent.real_case --id REAL-001 --query "payments-api pods restarting" \
+  --source "kubectl logs" --log raw.log --category oom_killed \
+  --keyword memory --expected-source data/runbooks/eks-oomkill.md \
+  --out data/eval/real/incidents.json
+```
+
+It redacts account IDs, IPs, emails, keys/tokens and EC2 hostnames (best-effort: read the result), appends the
+case, and refuses bad categories, duplicate ids and missing keywords. `--category` comes from the postmortem.
+Then run `python -m agent.eval`: the leakage check runs on the new case.
+
+## Ratchet
+
+`data/eval/real/MIN_REAL` holds the minimum real-case count that `python -m agent.eval` (and so CI) enforces.
+It is `0` today, so CI passes with a warning. Raise it as cases land (e.g. `15`) so the set cannot shrink.
+
 ## Case schema
 
 ```json

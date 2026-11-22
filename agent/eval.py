@@ -4,6 +4,8 @@
                                       # LLM behaviour is stubbed from each case's `llm_fixture`.
   python -m agent.eval --live         # real LLM (OPENAI_API_KEY / OPENAI_BASE_URL): measures LLM accuracy
   python -m agent.eval --min-real 20  # also fail unless >= 20 real-incident cases exist
+                                      # (default: the number in data/eval/real/MIN_REAL, a ratchet: raise it as
+                                      #  real cases are added, so the count can never silently shrink)
 
 Offline mode proves the pipeline and its guardrails; it says nothing about LLM accuracy.
 Only --live over real cases does, and the summary says how many real cases it covered.
@@ -24,11 +26,12 @@ from agent.memory import retrieval
 from agent.memory.retrieval import retrieve
 from agent.nodes.diagnose import _DENY, build_query
 from agent.orchestrator import run_agent
-from agent.signatures import UNKNOWN
+from agent.signatures import SIGNATURES, UNKNOWN
 from agent.state import LLM_CATEGORY
 
 EVAL_DIR = Path(__file__).resolve().parents[1] / "data" / "eval"
 REQUIRED = ("id", "query", "expected_category")
+VALID_CATEGORIES = {n for n, _ in SIGNATURES} | {"state_lock", LLM_CATEGORY, UNKNOWN}
 LIVE_CONF_CAP = 0.4  # an LLM-only verdict never exceeds this (agent.confidence)
 
 
@@ -46,7 +49,14 @@ def load_cases(eval_dir=None, include_real: bool = True) -> List[dict]:
         missing = [k for k in REQUIRED if k not in c]
         if missing:
             raise ValueError(f"eval case {c.get('id', '?')} missing {missing}")
+        if c["tier"] == "real" and c["expected_category"] not in VALID_CATEGORIES:
+            raise ValueError(f"eval case {c['id']}: unknown expected_category {c['expected_category']!r}")
     return cases
+
+
+def default_min_real(eval_dir=None) -> int:
+    f = (Path(eval_dir) if eval_dir else EVAL_DIR) / "real" / "MIN_REAL"
+    return int(f.read_text().strip()) if f.exists() else 0
 
 
 def wilson(k: int, n: int, z: float = 1.96):
@@ -155,9 +165,11 @@ def evaluate_case(case: dict, criteria: dict, live: bool = False) -> dict:
 def main(argv=()) -> int:
     ap = argparse.ArgumentParser(prog="python -m agent.eval")
     ap.add_argument("--live", action="store_true", help="use the real LLM instead of fixtures")
-    ap.add_argument("--min-real", type=int, default=0, help="fail unless at least N real cases exist")
+    ap.add_argument("--min-real", type=int, default=None,
+                    help="fail unless at least N real cases exist (default: data/eval/real/MIN_REAL)")
     args = ap.parse_args(list(argv))
 
+    min_real = default_min_real() if args.min_real is None else args.min_real
     cases = load_cases()
     criteria = json.loads((EVAL_DIR / "expected_outputs.json").read_text(encoding="utf-8"))
     status = 0
@@ -199,8 +211,8 @@ def main(argv=()) -> int:
         llm_rows = [r for r in rows if r["diagnosis_source"] in ("llm", "signature+llm") or r["expected"] in (LLM_CATEGORY, UNKNOWN)]
         print(f"live LLM: {sum(r['passed'] for r in llm_rows)}/{len(llm_rows)} LLM-relevant cases passed "
               f"({tiers.get('real', 0)} real)")
-    if tiers.get("real", 0) < args.min_real:
-        print(f"FAIL: {tiers.get('real', 0)} real cases < --min-real {args.min_real}")
+    if tiers.get("real", 0) < min_real:
+        print(f"FAIL: {tiers.get('real', 0)} real cases < --min-real {min_real}")
         status = 1
     if not tiers.get("real"):
         print("WARNING: 0 real-incident cases (data/eval/real/). Passing here is not evidence of real-world accuracy.")

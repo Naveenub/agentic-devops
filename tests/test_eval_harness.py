@@ -178,3 +178,49 @@ def test_known_gap_is_a_miss_that_does_not_fail_ci_but_xpass_does(tmp_path, monk
     ok = {**bad, "expected_category": "oom_killed", "expected_sources": ["data/runbooks/eks-oomkill.md"]}
     (d / "golden_incidents.json").write_text(json.dumps([ok]))
     assert ev.main([]) == 1 and "XPASS" in capsys.readouterr().out
+
+
+# --- real-case tooling ---------------------------------------------------------------------------
+
+def test_sanitize_redacts_identifiers_and_keeps_signature_text():
+    from agent.real_case import sanitize
+    raw = ("AccessDenied on arn:aws:iam::123456789012:role/ci from 192.168.4.7 by bob@corp.com\n"
+           "key AKIAIOSFODNN7EXAMPLE token ghp_abcdefghijklmnopqrstuvwxyz0123 host ip-10-1-2-3.ec2.internal")
+    out, counts = sanitize(raw)
+    assert "123456789012" not in out and "192.168.4.7" not in out and "bob@corp.com" not in out
+    assert "AKIAIOSFODNN7EXAMPLE" not in out and "ghp_abc" not in out and "ip-10-1-2-3" not in out
+    assert "AccessDenied" in out and "iam::000000000000:role/ci" in out
+    assert {"account_id", "ipv4", "email", "aws_key", "github_token", "ec2_host"} <= set(counts)
+    assert sanitize(out)[0] == out  # idempotent
+
+
+def test_new_case_roundtrips_through_the_loader_and_rejects_bad_labels(tmp_path, capsys):
+    from agent import real_case
+    log = tmp_path / "raw.log"
+    log.write_text("Last State: Terminated\n  Reason: OOMKilled\n  Exit Code: 137 account 123456789012")
+    out = tmp_path / "eval" / "real" / "a.json"
+    args = ["--id", "R1", "--query", "pod restarting", "--log", str(log), "--category", "oom_killed",
+            "--keyword", "memory", "--expected-source", "data/runbooks/eks-oomkill.md", "--out", str(out)]
+    assert real_case.main(args) == 0
+    case = json.loads(out.read_text())[0]
+    assert "123456789012" not in json.dumps(case) and case["expected_category"] == "oom_killed"
+    assert real_case.main(args) == 2                                   # duplicate id refused
+    assert real_case.main(["--id", "R3", "--query", "q", "--log", str(log), "--category", "bogus",
+                           "--keyword", "x", "--out", str(out)]) == 2
+    assert real_case.main(["--id", "R2", "--query", "q", "--log", str(log), "--category", "other_llm",
+                           "--out", str(out)]) == 2                    # keyword required
+
+
+def test_loader_rejects_unknown_real_category(tmp_path):
+    d = _write_eval_dir(tmp_path, [{"id": "R1", "query": "q", "expected_category": "oom"}])
+    with pytest.raises(ValueError, match="unknown expected_category"):
+        ev.load_cases(d)
+
+
+def test_min_real_ratchet_file_is_the_default(tmp_path, monkeypatch):
+    (tmp_path / "real").mkdir()
+    assert ev.default_min_real(tmp_path) == 0
+    (tmp_path / "real" / "MIN_REAL").write_text("15\n")
+    assert ev.default_min_real(tmp_path) == 15
+    monkeypatch.setattr(ev, "default_min_real", lambda: 3)
+    assert ev.main([]) == 1  # no real cases in the repo, ratchet says 3
