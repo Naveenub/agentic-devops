@@ -2,12 +2,13 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 
 from agent.cost_watch import check_cost, parse_watch, watch_forever
 from agent.graph import build_graph
@@ -95,34 +96,43 @@ def _verify_slack(raw: bytes, ts: str | None, sig: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid Slack signature")
 
 
-@router.post("/slack/command")
-async def slack_command(request: Request):
+def _handle_slack(payload: dict) -> None:
+    """Runs after the 200 ack (Slack gives 3s) and in a worker thread, so the agent/AWS calls
+    neither time the command out nor block the event loop."""
     from agent.tools.slack import send_message  # lazy: slack_sdk only needed here
 
+    channel = payload["channel_id"]
+    try:
+        tokens = payload["text"].split()
+        if tokens and tokens[0].lower() == "cost":  # `cost <service> <region>`, e.g. `cost ec2 us-east-1`
+            if len(tokens) < 3:
+                send_message(channel, "Usage: `cost <service> <region>` e.g. `cost ec2 us-east-1`")
+            else:
+                r = check_cost(" ".join(tokens[1:-1]), tokens[-1], notify=False)
+                a = r["cost_anomaly"]
+                send_message(channel, f"*Cost:* {a['message']}"
+                             + (f"\n*Suggested:* {r['suggestions'][0]}" if a["anomaly"] else ""))
+            return
+        result = _run(payload["text"])
+        send_message(
+            channel,
+            f"*Diagnosis:* {result['diagnosis']}\n"
+            f"*Confidence:* {result['confidence']}\n"
+            f"*Evidence:* {', '.join(result['evidence'])}",
+        )
+    except Exception:  # the ack already went out, so tell the channel instead of failing silently
+        logging.getLogger(__name__).exception("slack command failed")
+        send_message(channel, "Command failed; see server logs.")
+
+
+@router.post("/slack/command")
+async def slack_command(request: Request, background: BackgroundTasks):
     raw = await request.body()
     _verify_slack(raw, request.headers.get("x-slack-request-timestamp"), request.headers.get("x-slack-signature"))
     # Slack posts slash commands form-encoded; JSON is accepted too.
     payload = (json.loads(raw) if "json" in request.headers.get("content-type", "")
                else {k: v[0] for k, v in parse_qs(raw.decode()).items()})
-
-    tokens = payload["text"].split()
-    if tokens and tokens[0].lower() == "cost":  # `cost <service> <region>`, e.g. `cost ec2 us-east-1`
-        if len(tokens) < 3:
-            send_message(payload["channel_id"], "Usage: `cost <service> <region>` e.g. `cost ec2 us-east-1`")
-        else:
-            r = check_cost(" ".join(tokens[1:-1]), tokens[-1], notify=False)
-            a = r["cost_anomaly"]
-            send_message(payload["channel_id"], f"*Cost:* {a['message']}"
-                         + (f"\n*Suggested:* {r['suggestions'][0]}" if a["anomaly"] else ""))
-        return {"ok": True}
-
-    result = _run(payload["text"])
-    send_message(
-        payload["channel_id"],
-        f"*Diagnosis:* {result['diagnosis']}\n"
-        f"*Confidence:* {result['confidence']}\n"
-        f"*Evidence:* {', '.join(result['evidence'])}",
-    )
+    background.add_task(_handle_slack, payload)
     return {"ok": True}
 
 

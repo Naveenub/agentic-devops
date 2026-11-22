@@ -181,6 +181,17 @@ def test_api_key_required_on_analyze_and_cost_check(api):
     assert sent == []
 
 
+def test_slack_command_acks_then_reports_failure_to_channel(api):
+    client, sent, mp = api
+
+    def boom(*a, **k):
+        raise RuntimeError("aws down")
+    mp.setattr("agent.tools.aws_costs.fetch_daily_costs", boom)
+    r = _slack_post(client, {"text": "cost ec2 us-east-1", "channel_id": "C9"})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert sent == [("C9", "Command failed; see server logs.")]
+
+
 def test_docs_are_off_and_healthz_is_open(api):
     bare = TestClient(api[0].app)
     assert [bare.get(p).status_code for p in ("/docs", "/redoc", "/openapi.json")] == [404, 404, 404]
