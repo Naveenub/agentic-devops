@@ -10,6 +10,7 @@ from urllib.parse import parse_qs
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 
+from agent import llm
 from agent.cost_watch import check_cost, parse_watch, watch_forever
 from agent.graph import build_graph
 
@@ -41,10 +42,46 @@ def require_api_key(x_api_key: str | None = Header(None)) -> None:
         raise HTTPException(status_code=401, detail="invalid API key")
 
 
+def product_enabled() -> bool:
+    """Commercial layer (product/) is on only when PRODUCT_DB is set; the Apache-2.0 core runs without it."""
+    return bool(os.getenv("PRODUCT_DB"))
+
+
+def _auth(event: str):
+    """Per-route auth. Core mode: the shared AGENT_API_KEY, no tenant. Product mode: a per-tenant
+    API key with rate limit and (on hard-limit plans) quota; the dependency returns the tenant."""
+    def dep(x_api_key: str | None = Header(None)):
+        if not product_enabled():
+            require_api_key(x_api_key)
+            return None
+        from product.auth import current_tenant
+        from product.metering import check_quota
+
+        tenant = current_tenant(x_api_key)
+        check_quota(tenant, event)
+        return tenant
+    return dep
+
+
 def _run(question: str, extra: dict | None = None) -> dict:
     state = {"question": question}
     state.update({k: v for k, v in (extra or {}).items() if k in ("kubernetes", "github", "cost")})
+    logs = (extra or {}).get("logs")
+    if isinstance(logs, str) and logs.strip():  # caller-supplied log text: no server credentials needed
+        state["observations"] = [{"source": "supplied logs", "content": logs[-20000:]}]
     return graph.invoke(state)
+
+
+def _gate_shared_tools(tenant: dict | None, payload: dict) -> None:
+    """Tenants may not point the server's own kubectl/GitHub/AWS credentials at their requests
+    unless their plan grants shared_tools."""
+    if tenant is None:
+        return
+    from product.auth import allowed_inputs
+
+    denied = ({"kubernetes", "github", "cost"} & set(payload)) - allowed_inputs(tenant)
+    if denied:
+        raise HTTPException(status_code=403, detail=f"inputs not available on plan '{tenant['plan']}': {sorted(denied)}")
 
 
 @app.get("/healthz")
@@ -52,12 +89,23 @@ def healthz():
     return {"ok": True}
 
 
-@app.post("/analyze", dependencies=[Depends(require_api_key)])
-def analyze(payload: dict):
+@app.post("/analyze")
+def analyze(payload: dict, tenant: dict | None = Depends(_auth("analyze"))):
     question = payload.get("question") or payload.get("query")
     if not question:
         raise HTTPException(status_code=422, detail="'question' is required")
-    result = _run(question, payload)
+    _gate_shared_tools(tenant, payload)
+    tokens: list = []
+    reset = llm.usage_sink.set(tokens)
+    try:
+        result = _run(question, payload)
+    finally:
+        llm.usage_sink.reset(reset)
+    if tenant:
+        from product.metering import record
+
+        record(tenant, "analyze")
+        record(tenant, "llm_tokens", sum(tokens))
     return {
         "answer": result["answer"],
         "diagnosis": result["diagnosis"],
@@ -68,8 +116,8 @@ def analyze(payload: dict):
     }
 
 
-@app.post("/cost/check", dependencies=[Depends(require_api_key)])
-def cost_check(payload: dict):
+@app.post("/cost/check")
+def cost_check(payload: dict, tenant: dict | None = Depends(_auth("cost_check"))):
     """Run the agent on one service/region's daily spend; alert on a z-score spike.
     Alert targets come from SLACK_ALERT_CHANNEL / PAGERDUTY_ROUTING_KEY only, never the request."""
     service, region = payload.get("service"), payload.get("region")
@@ -79,7 +127,14 @@ def cost_check(payload: dict):
         threshold = float(payload.get("threshold", 2.0))
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="'threshold' must be a number")
-    return check_cost(service, region, threshold)
+    if tenant:  # reads the operator's AWS account and posts to the operator's Slack/PagerDuty
+        _gate_shared_tools(tenant, {"cost": True})
+    result = check_cost(service, region, threshold)
+    if tenant:
+        from product.metering import record
+
+        record(tenant, "cost_check")
+    return result
 
 
 def _verify_slack(raw: bytes, ts: str | None, sig: str | None) -> None:
@@ -140,3 +195,11 @@ async def slack_command(request: Request, background: BackgroundTasks):
 
 
 app.include_router(router)
+
+try:  # commercial layer; absent from the open-core image. Its routes answer 404 unless PRODUCT_DB is set.
+    from product.admin import admin, tenant_router
+except ImportError:
+    pass
+else:
+    app.include_router(admin)
+    app.include_router(tenant_router)

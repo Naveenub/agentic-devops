@@ -4,9 +4,13 @@ On only if OPENAI_API_KEY or OPENAI_BASE_URL is set; AGENT_LLM=off forces it off
 Every failure returns None so callers fall back to the deterministic path."""
 import json
 import os
-from typing import Callable, Optional
+from contextvars import ContextVar
+from typing import Callable, List, Optional
 
 _override: Optional[Callable[[str, str], Optional[str]]] = None
+
+# Optional per-request sink: when set, each real LLM call appends its total token count (for metering).
+usage_sink: ContextVar[Optional[List[int]]] = ContextVar("llm_usage_sink", default=None)
 
 
 def set_client(fn: Optional[Callable[[str, str], Optional[str]]]) -> None:
@@ -48,7 +52,11 @@ def _http(system: str, user: str) -> Optional[str]:
         },
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    body = resp.json()
+    sink = usage_sink.get()
+    if sink is not None:
+        sink.append(int((body.get("usage") or {}).get("total_tokens") or 0))
+    return body["choices"][0]["message"]["content"]
 
 
 def complete_json(system: str, user: str) -> Optional[dict]:

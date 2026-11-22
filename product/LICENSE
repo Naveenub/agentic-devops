@@ -1,0 +1,14 @@
+DevOps AI Agent — Commercial Product Layer
+
+Copyright (c) 2026 the copyright holder of this repository. All rights reserved.
+
+This directory (product/) is NOT covered by the Apache License 2.0 that applies to the rest of
+this repository. You may read it and run it for evaluation and non-production testing. Running it
+in production, offering it to third parties as a hosted service, or redistributing it requires a
+commercial license from the copyright holder.
+
+Everything outside product/ (agent/, api/, ui/, data/, tests other than tests/test_product.py, docs)
+remains Apache-2.0 under the top-level LICENSE and works without this directory.
+
+TEMPLATE NOTICE: this text is a placeholder describing the intended split. Have counsel replace it
+with final commercial terms (and decide on a contributor agreement/CLA) before publishing.

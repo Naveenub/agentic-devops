@@ -171,6 +171,20 @@ devops-ai-agent/
 
 ---
 
+## 🏢 Product Layer (multi-tenant, metered)
+
+The open core runs single-tenant with one `AGENT_API_KEY`. Setting `PRODUCT_DB` switches on the commercial layer in `product/` (separate license, see [LICENSING.md](LICENSING.md)):
+
+* **Auth & tenancy:** per-tenant API keys (`X-API-Key`, stored hashed, revocable), tenants created via `POST /admin/tenants` with `X-Admin-Key`.
+* **Plans & limits:** `free` (hard quota), `starter`, `pro`, `enterprise` (overage billed, not blocked); per-minute rate limits; override with `PRODUCT_PLANS`.
+* **Metering:** `analyze` runs, `cost_check` calls and LLM tokens recorded per tenant; `GET /usage` for the tenant, `GET /admin/usage/{tenant}` for you.
+* **Billing:** `POST /admin/billing/report` sends unreported usage to Stripe Billing Meters (idempotent). Set each tenant's `stripe_customer_id` via `PATCH /admin/tenants/{id}`.
+* **Isolation:** inputs that use the server's own kubectl/GitHub/AWS credentials are refused for tenants unless their plan has `shared_tools`; tenants send `"logs": "..."` text instead.
+
+Not covered: SSO/SAML, a billing portal, and multi-worker rate limiting (the limiter is in-process). `/slack/command` stays operator-level (Slack signature), unmetered.
+
+---
+
 ## 🛠️ Tech Stack
 
 ### Cloud-Native Focus (AWS + Kubernetes + Terraform)

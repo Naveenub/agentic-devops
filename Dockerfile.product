@@ -1,0 +1,9 @@
+# Commercial image: the open-core image plus product/. Build the core first:
+#   docker build -t agentic-devops-core . && docker build -f Dockerfile.product -t agentic-devops-product .
+ARG BASE=agentic-devops-core
+FROM ${BASE}
+USER root
+RUN mkdir -p /data/product && chown app:app /data/product
+COPY --chown=app:app product/ product/
+USER app
+ENV PRODUCT_DB=/data/product/product.db
