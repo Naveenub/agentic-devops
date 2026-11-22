@@ -152,14 +152,14 @@ devops-ai-agent/
 │   ├── demo/
 │   │   ├── README.md
 │   │   ├── demo-script.md
-│   │   └── devops-agent-demo.md
+│   │   └── devops-agent-demo.gif
 │   ├── screenshots/
 │   │   ├── README.md
-│   │   ├── 01-slack-alert.png
+│   │   ├── 01-incident-input.png
 │   │   ├── 02-agent-analysis.png
 │   │   ├── 03-root-cause.png
 │   │   ├── 04-confidence-score.png
-│   │   └── 05-terraform-drift.png
+│   │   └── 05-terraform-failure.png
 ├── .env.example
 ├── .gitignore
 ├── LICENSE
@@ -282,7 +282,7 @@ Confidence scoring (`agent/confidence.py`) is graded, not fixed: signature stren
 
 ## 📸 Screenshots & Demo Flow
 
-> Screenshots and GIFs make this project instantly understandable to reviewers and recruiters.
+> Captured from the real agent running on the sample logs in `data/logs/` (offline retriever, no LLM key).
 
 ### 1️⃣ CLI Diagnosis Demo
 
@@ -298,7 +298,7 @@ DevOps Agent > Why is pod payments-api crashing in prod?
 * Suggested memory limit update
 * Referenced similar past incident
 
-📷 *Screenshot placeholder:* `docs/screenshots/cli-k8s-diagnosis.png`
+![Root cause](docs/screenshots/03-root-cause.png)
 
 ---
 
@@ -312,19 +312,17 @@ Agent:
 * Identifies missing variable / IAM permission
 * Suggests Terraform fix (no apply)
 
-📷 *Screenshot placeholder:* `docs/screenshots/github-actions-failure.png`
+![Terraform CI failure](docs/screenshots/05-terraform-failure.png)
 
 ---
 
 ### 3️⃣ End-to-End Demo GIF
 
-📽️ **Recommended GIF flow:**
+![Demo](docs/demo/devops-agent-demo.gif)
 
 1. Ask question in CLI
-2. Agent fetches logs
-3. Diagnosis + suggestions returned
-
-📁 `docs/demo/devops-agent-demo.gif`
+2. Agent reads logs and retrieves runbooks / past incidents
+3. Diagnosis, evidence, suggestions and confidence returned
 
 ---
 

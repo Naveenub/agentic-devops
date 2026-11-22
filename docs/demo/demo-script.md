@@ -1,22 +1,20 @@
-# DevOps AI Agent – 90 Second Demo Script
+# DevOps AI Agent – Demo Script
 
 [0–10s]
-This is an AI agent designed for real DevOps incidents — not a chatbot.
+This is an AI agent for real DevOps incidents, not a chatbot.
 
 [10–25s]
-An alert comes in through Slack: the payments API pods are restarting.
+We ask why the payments API pod is crashing in prod.
 
-[25–40s]
-The agent fetches Kubernetes logs and retrieves similar past incidents and runbooks using RAG.
+[25–45s]
+The agent reads the Kubernetes logs and retrieves similar past incidents and runbooks using RAG.
 
-[40–55s]
-It identifies the root cause as a Pod OOMKill and explains why, citing exact sources.
-
-[55–65s]
-A confidence score is generated. If this were low, PagerDuty escalation would trigger automatically.
+[45–65s]
+It identifies the root cause as a Pod OOMKill, citing the exact log line and retrieved sources.
 
 [65–80s]
-In parallel, the agent detects Terraform drift and suggests an auto-generated fix via pull request.
+It proposes read-only checks and a safe fix through the normal pipeline, and a confidence score.
+It never applies changes itself.
 
 [80–90s]
-This isn’t AI guessing — it’s AI reasoning over your infrastructure.
+Same flow for CI: a Terraform apply failure is parsed as a missing iam:PassRole permission.

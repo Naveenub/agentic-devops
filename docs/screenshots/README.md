@@ -1,23 +1,12 @@
 # Screenshots – DevOps AI Agent
 
-This folder contains screenshots used in the README and documentation.
-They illustrate the full incident-to-resolution workflow.
+Rendered from the real output of `agent.orchestrator.run_agent` on the sample logs in
+`data/logs/` (offline retriever, no LLM key). Terminal-style renders, not live captures.
 
-## Screenshot Index
-
-### 01-slack-alert.png
-Incoming Slack alert triggering analysis.
-
-### 02-agent-analysis.png
-Agent fetching logs and retrieving historical incidents via RAG.
-
-### 03-root-cause.png
-Diagnoser agent output with root cause explanation and citations.
-
-### 04-confidence-score.png
-Confidence score and escalation logic displayed.
-
-### 05-terraform-drift.png
-Terraform drift detected with auto-PR suggestion.
-
-> These screenshots are taken from the CLI and Slack bot demo.
+| File | Shows |
+|---|---|
+| 01-incident-input.png | The question and the payments-api log lines the agent observes |
+| 02-agent-analysis.png | Observation plus RAG retrieval of runbooks / past incidents, with scores |
+| 03-root-cause.png | Root cause, evidence and read-only suggested fix (OOMKill) |
+| 04-confidence-score.png | Heuristic confidence score (not a calibrated probability) |
+| 05-terraform-failure.png | Terraform CI failure parsed as an IAM `iam:PassRole` denial |
