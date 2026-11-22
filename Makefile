@@ -1,4 +1,4 @@
-.PHONY: legal-check legal-fill help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync billing-report
+.PHONY: legal-check legal-fill help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync billing-report pricing-check pricing-measure
 
 help:
 	@echo "Targets: test eval live-eval report report-check ingest up image image-product"
@@ -54,3 +54,12 @@ legal-check:
 # Write the values from product/legal_docs/entity.json into product/LICENSE and CLA.md
 legal-fill:
 	python -m product.legal fill
+
+# Pricing readiness (product/pricing_evidence.json): exit 1 while cost inputs are missing, a plan's worst-case margin is
+# below MIN_GROSS_MARGIN, there is no willingness-to-pay evidence, or PRICES_CONFIRMED is not true. Run before `stripe-sync --apply`.
+pricing-check:
+	python -m product.unit_economics check
+
+# Measure real tokens per analysis (needs OPENAI_API_KEY / OPENAI_BASE_URL) and record them in pricing_evidence.json
+pricing-measure:
+	python -m product.unit_economics measure

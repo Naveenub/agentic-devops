@@ -1,0 +1,14 @@
+{
+  "_readme": "Facts only you can supply. The prices in product/plans.py stay placeholders until this file backs them: cost inputs filled (tokens_per_analyze comes from `python -m product.unit_economics measure`), every plan clears MIN_GROSS_MARGIN in the worst case, willingness-to-pay evidence recorded, and PRICES_CONFIRMED set to true. Check with: python -m product.unit_economics check",
+  "LLM_MODEL": null,
+  "LLM_USD_PER_MILLION_TOKENS": null,
+  "tokens_per_analyze": null,
+  "COST_CHECK_USD": 0.01,
+  "OTHER_USD_PER_ANALYZE": null,
+  "FIXED_USD_PER_MONTH_PER_TENANT": null,
+  "PAYMENT_FEE_PERCENT": 2.9,
+  "PAYMENT_FEE_FIXED_USD": 0.30,
+  "MIN_GROSS_MARGIN": null,
+  "willingness_to_pay": [],
+  "PRICES_CONFIRMED": false
+}
