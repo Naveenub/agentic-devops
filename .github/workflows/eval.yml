@@ -18,5 +18,8 @@ jobs:
       - name: Unit tests
         run: make test
 
+      - name: Offline eval (golden set + groundedness)
+        run: make eval
+
       - name: Report is current (synthetic dataset)
         run: make report-check
