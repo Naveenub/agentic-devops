@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS tenants (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, plan TEXT NOT NULL DEFAULT 'free',
   stripe_customer_id TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
   stripe_subscription_id TEXT, subscription_status TEXT, email TEXT,
-  terms_version TEXT, terms_accepted_at REAL);
+  terms_version TEXT, terms_accepted_at REAL, email_verified_at REAL);
 CREATE TABLE IF NOT EXISTS stripe_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, received_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS api_keys (
   key_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), prefix TEXT NOT NULL,
@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS recovery_tokens (
   token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
   created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
 CREATE INDEX IF NOT EXISTS recovery_tokens_tenant ON recovery_tokens(tenant_id, created_at);
+CREATE TABLE IF NOT EXISTS verify_tokens (
+  token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
+CREATE INDEX IF NOT EXISTS verify_tokens_tenant ON verify_tokens(tenant_id, created_at);
 CREATE TABLE IF NOT EXISTS job_runs (name TEXT PRIMARY KEY, last_run REAL NOT NULL);
 """
 # PostgreSQL flavour of the same schema: 64-bit ids and counters, double-precision epoch seconds.
@@ -50,9 +54,11 @@ PG_SCHEMA = (re.sub(r"\bREAL\b", "DOUBLE PRECISION",
                     .replace("quantity INTEGER", "quantity BIGINT"))
              + "CREATE UNIQUE INDEX IF NOT EXISTS tenants_email_uq ON tenants(email);\n"
              "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS terms_version TEXT;\n"
-             "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS terms_accepted_at DOUBLE PRECISION;\n")
+             "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS terms_accepted_at DOUBLE PRECISION;\n"
+             "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS email_verified_at DOUBLE PRECISION;\n")
 
 RECOVERY_TTL = 1800  # seconds a recovery link stays valid
+VERIFY_TTL = 86400  # seconds a verification link stays valid
 RECOVERY_COOLDOWN = 600  # at most one recovery email per tenant in this window (stops mailbombing a registered address)
 
 
@@ -99,7 +105,7 @@ def _migrate(c) -> None:
     PostgreSQL databases are created from the current schema)."""
     have = {r[1] for r in c.execute("PRAGMA table_info(tenants)")}
     for col, typ in (("stripe_subscription_id", "TEXT"), ("subscription_status", "TEXT"), ("email", "TEXT"),
-                     ("terms_version", "TEXT"), ("terms_accepted_at", "REAL")):
+                     ("terms_version", "TEXT"), ("terms_accepted_at", "REAL"), ("email_verified_at", "REAL")):
         if col not in have:
             try:
                 c.execute(f"ALTER TABLE tenants ADD COLUMN {col} {typ}")
@@ -204,20 +210,37 @@ def month_start(now: float | None = None) -> float:
     return datetime(d.year, d.month, 1, tzinfo=timezone.utc).timestamp()
 
 
-def create_tenant(name: str, plan: str = "free", email: str | None = None, terms_version: str | None = None) -> dict:
-    """`email` must already be normalised (clean_email). Raises EmailTaken if another tenant has it.
+def _reclaim_email(email: str, after: float) -> bool:
+    """Free `email` if it is only squatted: its holder never proved the mailbox within `after` seconds, is on
+    the free plan with no subscription, and was sent a verification link (so it signed up while verification was
+    on; older accounts are never touched). The holder keeps its keys, it just loses the address."""
+    with conn(immediate=True, lock="reclaim:" + email) as c:
+        return c.execute(
+            "UPDATE tenants SET email=NULL WHERE email=? AND email_verified_at IS NULL AND plan='free' "
+            "AND stripe_subscription_id IS NULL AND created_at<? "
+            "AND EXISTS (SELECT 1 FROM verify_tokens v WHERE v.tenant_id=tenants.id)",
+            (email, time.time() - after)).rowcount > 0
+
+
+def create_tenant(name: str, plan: str = "free", email: str | None = None, terms_version: str | None = None,
+                  reclaim_after: float | None = None) -> dict:
+    """`email` must already be normalised (clean_email). Raises EmailTaken if another tenant has it, unless that
+    tenant's claim is unverified and older than `reclaim_after` seconds (see _reclaim_email).
     `terms_version` records that the signer accepted that version of the legal documents (and when)."""
     from product.plans import get_plan
     get_plan(plan)  # validates
     tid = "ten_" + secrets.token_hex(8)
-    try:
-        with conn() as c:
-            now = time.time()
-            c.execute("INSERT INTO tenants(id,name,plan,created_at,email,terms_version,terms_accepted_at) "
-                      "VALUES(?,?,?,?,?,?,?)",
-                      (tid, name, plan, now, email, terms_version, now if terms_version else None))
-    except INTEGRITY_ERRORS:  # the only unique column besides the random id is email
-        raise EmailTaken(email)
+    for attempt in (0, 1):
+        try:
+            with conn() as c:
+                now = time.time()
+                c.execute("INSERT INTO tenants(id,name,plan,created_at,email,terms_version,terms_accepted_at) "
+                          "VALUES(?,?,?,?,?,?,?)",
+                          (tid, name, plan, now, email, terms_version, now if terms_version else None))
+            break
+        except INTEGRITY_ERRORS:  # the only unique column besides the random id is email
+            if attempt or not (email and reclaim_after is not None and _reclaim_email(email, reclaim_after)):
+                raise EmailTaken(email)
     return {"id": tid, "name": name, "plan": plan, **({"email": email} if email else {})}
 
 
@@ -300,9 +323,41 @@ def redeem_recovery(token: str) -> tuple[dict, str] | None:
         tid = r["tenant_id"]
         c.execute("UPDATE recovery_tokens SET used_at=? WHERE token_hash=?", (now, hash_key(token)))
         c.execute("UPDATE api_keys SET revoked_at=? WHERE tenant_id=? AND revoked_at IS NULL", (now, tid))
+        c.execute("UPDATE tenants SET email_verified_at=? WHERE id=? AND email_verified_at IS NULL", (now, tid))  # opening the mailed link proves the mailbox
         key = _insert_key(c, tid)
         tenant = dict(c.execute("SELECT * FROM tenants WHERE id=?", (tid,)).fetchone())
     return tenant, key
+
+
+def start_verification(tid: str) -> str | None:
+    """Single-use token proving control of the tenant's mailbox (plaintext returned once, only its hash stored),
+    or None if the tenant has no email, is already verified, or one was sent within RECOVERY_COOLDOWN."""
+    now = time.time()
+    token = secrets.token_urlsafe(32)
+    with conn(immediate=True, lock=f"verify:{tid}") as c:
+        t = c.execute("SELECT email, email_verified_at FROM tenants WHERE id=?", (tid,)).fetchone()
+        if not t or not t["email"] or t["email_verified_at"]:
+            return None
+        if c.execute("SELECT 1 FROM verify_tokens WHERE tenant_id=? AND created_at>?",
+                     (tid, now - RECOVERY_COOLDOWN)).fetchone():
+            return None
+        c.execute("DELETE FROM verify_tokens WHERE tenant_id=? OR expires_at<=?", (tid, now))
+        c.execute("INSERT INTO verify_tokens(token_hash,tenant_id,created_at,expires_at) VALUES(?,?,?,?)",
+                  (hash_key(token), tid, now, now + VERIFY_TTL))
+    return token
+
+
+def redeem_verification(token: str) -> dict | None:
+    """Spend a verification token and mark the tenant's email verified. None if unknown, used or expired."""
+    now = time.time()
+    with conn(immediate=True, lock="verify-redeem:" + hash_key(token)) as c:
+        r = c.execute("SELECT tenant_id FROM verify_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>?",
+                      (hash_key(token), now)).fetchone()
+        if not r:
+            return None
+        c.execute("UPDATE verify_tokens SET used_at=? WHERE token_hash=?", (now, hash_key(token)))
+        c.execute("UPDATE tenants SET email_verified_at=? WHERE id=? AND email_verified_at IS NULL", (now, r["tenant_id"]))
+        return dict(c.execute("SELECT * FROM tenants WHERE id=?", (r["tenant_id"],)).fetchone())
 
 
 def revoke_key(prefix_or_key: str, tid: str) -> int:

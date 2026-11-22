@@ -15,7 +15,7 @@ def env(tmp_path, monkeypatch):
     if pg:
         with store.conn() as db:
             db.execute("TRUNCATE tenants, stripe_events, api_keys, usage, rate_hits, slack_links, signup_hits, "
-                       "recover_hits, recovery_tokens, job_runs RESTART IDENTITY CASCADE")
+                       "recover_hits, recovery_tokens, verify_tokens, job_runs RESTART IDENTITY CASCADE")
     monkeypatch.setenv("PRODUCT_ADMIN_KEY", "adm")
     monkeypatch.setenv("AGENT_LLM", "off")
     monkeypatch.setenv("PRODUCT_SIGNUP", "on")  # signup is closed unless opened; most tests need it open
@@ -664,8 +664,13 @@ def mail_env(env):
     mp.setenv("PRODUCT_SMTP_HOST", "smtp.test")
     mp.setenv("PRODUCT_SMTP_FROM", "DevOps <no-reply@example.com>")
     mp.setenv("PRODUCT_PUBLIC_URL", "https://agent.example.com/")
-    sent = []
-    mp.setattr(mailer, "send", lambda to, subject, body: sent.append((to, subject, body)))
+    class Sent(list):  # recovery mail; signup verification mail is kept apart so recovery tests count only theirs
+        verification: list = []
+
+    sent = Sent()
+    sent.verification = []
+    mp.setattr(mailer, "send", lambda to, subject, body: (sent.verification if subject.startswith("Confirm your email")
+                                                          else sent).append((to, subject, body)))
     return c, mp, sent
 
 
@@ -991,3 +996,57 @@ def test_shipped_legal_texts_only_use_known_tokens():
     assert used <= set(legal.FIELDS), used - set(legal.FIELDS)
     assert legal.fill("{{LEGAL_NAME}} {{VENUE}}", {"LEGAL_NAME": " A  B "}) == "A B {{VENUE}}"  # blanks stay visible
     assert legal.unresolved_tokens()  # the shipped licence files still have tokens until `python -m product.legal fill`
+
+
+# ---- email verification at signup ---------------------------------------------------------------
+
+def _vtoken(sent):
+    return _re.search(r"https://agent\.example\.com/verify#t=([A-Za-z0-9_-]+)", sent.verification[-1][2]).group(1)
+
+
+def test_signup_mails_a_link_that_verifies_the_email_once(mail_env):
+    c, _, sent = mail_env
+    t = _signup(c, email="v@example.com").json()
+    assert t["email_verified"] is False and len(sent.verification) == 1 and sent.verification[0][0] == "v@example.com"
+    key = {"x-api-key": t["api_key"]}
+    assert c.get("/billing", headers=key).json()["email_verified"] is False
+    tok = _vtoken(sent)
+    assert c.get("/verify").status_code == 200  # opening the page (a mail scanner) spends nothing
+    assert c.get("/billing", headers=key).json()["email_verified"] is False
+    assert c.post("/verify/confirm", json={"token": tok}).status_code == 200
+    assert c.get("/billing", headers=key).json()["email_verified"] is True
+    assert c.post("/verify/confirm", json={"token": tok}).status_code == 400  # single use
+    assert c.post("/verify/confirm", json={"token": "junk"}).status_code == 400
+    assert c.post("/verify/resend", headers=key).json() == {"status": "already verified"}
+
+
+def test_unverified_email_is_taken_over_only_after_the_grace_period(mail_env):
+    c, mp, sent = mail_env
+    squatter = _signup(c, email="victim@example.com").json()
+    assert _signup(c, email="victim@example.com").status_code == 409  # inside the grace period
+    mp.setenv("PRODUCT_VERIFY_GRACE", "0")
+    owner = _signup(c, email="victim@example.com")
+    assert owner.status_code == 200 and store.tenant_for_email("victim@example.com")["id"] == owner.json()["id"]
+    assert _ask(c, squatter["api_key"]).status_code == 200  # the old account keeps its keys, only the address moves
+    # a verified address is never taken over, however short the grace period
+    tok = _vtoken(sent)
+    c.post("/verify/confirm", json={"token": tok})
+    assert _signup(c, email="victim@example.com").status_code == 409
+
+
+def test_resend_is_throttled_and_recovery_also_verifies(mail_env):
+    c, _, sent = mail_env
+    t = _signup(c, email="r@example.com").json()
+    key = {"x-api-key": t["api_key"]}
+    assert c.post("/verify/resend", headers=key).status_code == 202 and len(sent.verification) == 1  # cooldown: no 2nd mail
+    c.post("/recover", json={"email": "r@example.com"})
+    assert c.post("/recover/confirm", json={"token": _token(sent)}).status_code == 200
+    assert store.get_tenant(t["id"])["email_verified_at"] is not None
+
+
+def test_no_verification_mail_without_mail_config(env):
+    c, _ = env
+    r = _signup(c).json()
+    assert r["email_verified"] is False
+    with store.conn() as db:
+        assert db.execute("SELECT COUNT(*) FROM verify_tokens").fetchone()[0] == 0

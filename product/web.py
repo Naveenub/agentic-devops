@@ -3,6 +3,9 @@
   GET  /pricing    plans, included usage, prices (from plans.py), what is purchasable (HTML, public)
   GET  /signup     signup form (HTML, public)
   POST /signup     {"name": "...", "email": "..."} -> tenant on `free` + API key (once)
+  GET  /verify     opened from the emailed link: button confirms the signup email (HTML, public)
+  POST /verify/confirm {"token": "..."} -> marks the tenant's email verified
+  POST /verify/resend  (tenant auth) re-mail the verification link; 202
   GET  /recover    lost key: ask for an emailed link, or (from the link) create a new key (HTML, public)
   POST /recover    {"email": "..."} -> 202 whether or not the address is registered; a one-time link is emailed if it is
   POST /recover/confirm {"token": "..."} -> new API key (once); every older key of that tenant is revoked
@@ -19,6 +22,8 @@ Paying is the existing flow: /account calls POST /billing/checkout and POST /bil
                                 operators still use POST /admin/tenants.)
   PRODUCT_SIGNUP_PER_IP_HOUR    default 5     PRODUCT_SIGNUP_PER_DAY   default 200 (whole deployment)
   PRODUCT_RECOVER_PER_IP_HOUR   default 5     PRODUCT_RECOVER_PER_DAY  default 200 (whole deployment)
+  PRODUCT_VERIFY_GRACE          default 86400. Seconds an unverified signup email is protected; after that a new signup
+                                with the same address takes it over (the old account keeps its keys, loses the email)
   PRODUCT_TRUST_PROXY=1         take the client IP from the last X-Forwarded-For entry (set only behind a proxy
                                 that appends it, else callers can spoof their IP and dodge the per-IP limits)
   PRODUCT_CONTACT_URL           where plans that cannot be bought online (e.g. enterprise) send people
@@ -75,7 +80,7 @@ def _client_ip(request: Request) -> str:
 # ---- JSON ---------------------------------------------------------------------------------------
 
 @web_router.post("/signup")
-def signup(payload: dict, request: Request):
+def signup(payload: dict, request: Request, background: BackgroundTasks):
     """Public, and only while the operator has opened signup. Always creates a `free` tenant (paid plans go
     through Checkout, after the webhook confirms). The email is required: it is the only way to recover a lost key.
     No Stripe call here, so anonymous traffic cannot create Stripe customers."""
@@ -98,11 +103,47 @@ def signup(payload: dict, request: Request):
                             _int_env("PRODUCT_SIGNUP_PER_DAY", 200)):
         raise HTTPException(status_code=429, detail="too many signups, try again later", headers={"Retry-After": "3600"})
     try:
-        t = store.create_tenant(name, "free", email, terms_version=legal.VERSION)
+        t = store.create_tenant(name, "free", email, terms_version=legal.VERSION,
+                                reclaim_after=_int_env("PRODUCT_VERIFY_GRACE", 86400) if mailer.configured() else None)
     except store.EmailTaken:
         raise HTTPException(status_code=409, detail="an account with that email already exists; " + (
             "use key recovery to get a new key" if mailer.configured() else "ask the operator for a new key"))
-    return {**t, "api_key": store.issue_key(t["id"])}  # shown once
+    token = store.start_verification(t["id"]) if mailer.configured() else None
+    if token:
+        background.add_task(_send_verification, email, token)
+    return {**t, "email_verified": False, "api_key": store.issue_key(t["id"])}  # shown once
+
+
+def _send_verification(email: str, token: str) -> None:
+    link = f"{mailer.public_url()}/verify#t={token}"  # fragment, as with recovery: not sent to a server, so not logged
+    mailer.send_quietly(
+        email, "Confirm your email for DevOps AI Agent",
+        "Someone signed up for DevOps AI Agent with this address.\n\n"
+        f"Open this link within {store.VERIFY_TTL // 3600} hours to confirm it:\n{link}\n\n"
+        "Until it is confirmed, another signup with this address can take it over after a grace period.\n"
+        "If this was not you, ignore this email.\n")
+
+
+@web_router.post("/verify/confirm")
+def verify_confirm(payload: dict):
+    """Public; the one-time token is the credential."""
+    token = payload.get("token")
+    t = store.redeem_verification(token) if isinstance(token, str) and 16 <= len(token) <= 200 else None
+    if not t:
+        raise HTTPException(status_code=400, detail="this verification link is invalid, expired or already used")
+    return {"id": t["id"], "email_verified": True}
+
+
+@web_router.post("/verify/resend", status_code=202)
+def verify_resend(background: BackgroundTasks, tenant: dict = Depends(current_tenant)):
+    if not mailer.configured():
+        raise HTTPException(status_code=503, detail="email is not set up on this server")
+    if tenant.get("email_verified_at"):
+        return {"status": "already verified"}
+    token = store.start_verification(tenant["id"])
+    if token:
+        background.add_task(_send_verification, tenant["email"], token)
+    return {"status": "If a link was due, it is on its way (at most one per 10 minutes)."}
 
 
 RECOVERY_ACK = (f"If that email is registered, a recovery link is on its way. "
@@ -158,6 +199,7 @@ def billing_state(tenant: dict = Depends(current_tenant)):
         "tenant": tenant["id"], "name": tenant["name"], "plan": tenant["plan"],
         "subscription_status": tenant.get("subscription_status"),
         "has_subscription": has_sub,
+        "email_verified": bool(tenant.get("email_verified_at")),
         "can_manage": bool(tenant.get("stripe_customer_id")),  # the portal needs a Stripe customer
         "purchasable": [p.name for p in _ordered_plans() if subscriptions.purchasable(p.name)] if not has_sub else [],
     }
@@ -279,6 +321,30 @@ $('f').addEventListener('submit',async ev=>{
 $('copy').addEventListener('click',()=>{navigator.clipboard&&navigator.clipboard.writeText($('key').textContent)});
 """
     return _page("Sign up", body, script, cache=False)
+
+
+@web_router.get("/verify", response_class=HTMLResponse)
+def verify_page():
+    body = ('<h1>Confirm your email</h1><div id="ask" class="box"><p class="lead">Open the link we emailed you.</p></div>'
+            '<div id="go" class="box" hidden><p class="lead">Confirm that this address is yours.</p>'
+            '<div class="row"><button id="b" type="button">Confirm email</button></div></div>'
+            '<div id="msg" class="msg box" role="status"></div>')
+    script = """
+const $=id=>document.getElementById(id);
+const say=(t,c)=>{$('msg').className='msg box '+(c||'');$('msg').textContent=t};
+const tok=new URLSearchParams(location.hash.slice(1)).get('t')||'';
+if(tok){history.replaceState(null,'',location.pathname);$('ask').hidden=true;$('go').hidden=false}
+$('b').addEventListener('click',async()=>{
+  say('Confirming…');
+  try{
+    const r=await fetch('/verify/confirm',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:tok})});
+    const b=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(typeof b.detail==='string'?b.detail:'Request failed ('+r.status+')');
+    $('go').hidden=true;say('Email confirmed.','ok');
+  }catch(e){say(e.message,'err')}
+});
+"""
+    return _page("Confirm your email", body, script, cache=False)
 
 
 @web_router.get("/recover", response_class=HTMLResponse)
