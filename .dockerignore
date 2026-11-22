@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.chroma/
+tests/
+docs/
+reports/
+ui/
+*.md
+Dockerfile
+docker-compose.yml
