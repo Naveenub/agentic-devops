@@ -1,37 +1,22 @@
-name: DevOps Agent Evaluation
+name: DevOps Agent Tests and Report
 
 on: [push, pull_request]
 
 jobs:
-  eval:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: 3.11
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Run ingestion
-        run: |
-          python agent/memory/ingest.py
+      - name: Unit tests
+        run: make test
 
-      - name: Run evaluation
-        run: |
-          make eval
-
-name: AI Evaluation
-
-on: [push]
-
-jobs:
-  eval:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - run: make eval
+      - name: Report is current (synthetic dataset)
+        run: make report-check
