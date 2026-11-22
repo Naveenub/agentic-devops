@@ -1,8 +1,13 @@
 import asyncio
+import hashlib
+import hmac
+import json
 import os
+import time
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 
 from agent.cost_watch import check_cost, parse_watch, watch_forever
 from agent.graph import build_graph
@@ -61,9 +66,29 @@ def cost_check(payload: dict):
     return check_cost(service, region, threshold)
 
 
+def _verify_slack(raw: bytes, ts: str | None, sig: str | None) -> None:
+    """Slack request signing: HMAC-SHA256 of `v0:{ts}:{body}`, 5-minute replay window. Fails closed."""
+    secret = os.getenv("SLACK_SIGNING_SECRET")
+    if not secret:
+        raise HTTPException(status_code=503, detail="SLACK_SIGNING_SECRET is not configured")
+    try:
+        fresh = abs(time.time() - int(ts)) <= 300
+    except (TypeError, ValueError):
+        fresh = False
+    expected = "v0=" + hmac.new(secret.encode(), b"v0:" + (ts or "").encode() + b":" + raw, hashlib.sha256).hexdigest()
+    if not (fresh and hmac.compare_digest(expected.encode(), (sig or "").encode())):
+        raise HTTPException(status_code=401, detail="invalid Slack signature")
+
+
 @router.post("/slack/command")
-async def slack_command(payload: dict):
+async def slack_command(request: Request):
     from agent.tools.slack import send_message  # lazy: slack_sdk only needed here
+
+    raw = await request.body()
+    _verify_slack(raw, request.headers.get("x-slack-request-timestamp"), request.headers.get("x-slack-signature"))
+    # Slack posts slash commands form-encoded; JSON is accepted too.
+    payload = (json.loads(raw) if "json" in request.headers.get("content-type", "")
+               else {k: v[0] for k, v in parse_qs(raw.decode()).items()})
 
     tokens = payload["text"].split()
     if tokens and tokens[0].lower() == "cost":  # `cost <service> <region>`, e.g. `cost ec2 us-east-1`

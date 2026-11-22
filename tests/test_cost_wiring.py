@@ -1,3 +1,8 @@
+import hashlib
+import hmac
+import json
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -41,7 +46,16 @@ def api(monkeypatch):
     sent = []
     monkeypatch.setattr(slack, "send_message", lambda ch, text: sent.append((ch, text)))
     monkeypatch.setenv("SLACK_ALERT_CHANNEL", "C123")
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "s3cret")
     return TestClient(app), sent, monkeypatch
+
+
+def _slack_post(client, body, secret="s3cret", ts=None, sig=None):
+    raw = json.dumps(body).encode()
+    ts = str(int(time.time()) if ts is None else ts)
+    sig = sig or "v0=" + hmac.new(secret.encode(), f"v0:{ts}:".encode() + raw, hashlib.sha256).hexdigest()
+    return client.post("/slack/command", content=raw, headers={
+        "content-type": "application/json", "x-slack-request-timestamp": ts, "x-slack-signature": sig})
 
 
 def _stub_costs(monkeypatch, values):
@@ -143,16 +157,35 @@ def test_short_service_names_resolve_to_cost_explorer_names(api):
 def test_slack_command_cost_replies_without_alerting(api):
     client, sent, mp = api
     _stub_costs(mp, SPIKE)
-    client.post("/slack/command", json={"text": "cost ec2 us-east-1", "channel_id": "C9"})
+    _slack_post(client, {"text": "cost ec2 us-east-1", "channel_id": "C9"})
     assert [c for c, _ in sent] == ["C9"] and "z=" in sent[0][1] and "Suggested" in sent[0][1]
-    client.post("/slack/command", json={"text": "cost ec2", "channel_id": "C9"})
+    _slack_post(client, {"text": "cost ec2", "channel_id": "C9"})
     assert "Usage" in sent[1][1]
 
 
 def test_slack_command_still_diagnoses_other_text(api):
     client, sent, _ = api
-    client.post("/slack/command", json={"text": "pod exit code 137", "channel_id": "C9"})
+    _slack_post(client, {"text": "pod exit code 137", "channel_id": "C9"})
     assert "*Diagnosis:*" in sent[0][1]
+
+
+def test_slack_command_rejects_bad_signature_stale_ts_and_missing_secret(api):
+    client, sent, mp = api
+    body = {"text": "pod exit code 137", "channel_id": "C9"}
+    assert client.post("/slack/command", json=body).status_code == 401  # unsigned
+    assert _slack_post(client, body, secret="wrong").status_code == 401
+    assert _slack_post(client, body, ts=time.time() - 600).status_code == 401  # replay
+    mp.delenv("SLACK_SIGNING_SECRET")
+    assert _slack_post(client, body).status_code == 503  # fails closed
+    assert sent == []
+
+
+def test_slack_client_is_not_built_at_import(monkeypatch):
+    import importlib
+    import agent.tools.slack as slack
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    importlib.reload(slack)
+    assert slack._client.cache_info().currsize == 0
 
 
 def test_parse_watch():
