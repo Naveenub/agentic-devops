@@ -24,16 +24,37 @@ def create_tenant(payload: dict):
     name = payload.get("name")
     if not name:
         raise HTTPException(status_code=422, detail="'name' is required")
+    email = None
+    if payload.get("email") is not None:  # optional for operators; self-serve signups always have one
+        try:
+            email = store.clean_email(payload["email"])
+        except ValueError as e:
+            raise _bad(e)
     try:
-        t = store.create_tenant(name, payload.get("plan", "free"))
+        t = store.create_tenant(name, payload.get("plan", "free"), email)
     except KeyError as e:
         raise _bad(e)
+    except store.EmailTaken:
+        raise HTTPException(status_code=409, detail="a tenant with that email already exists")
     if os.getenv("STRIPE_SECRET_KEY"):  # best effort: checkout creates the customer later if this fails
         try:
             subscriptions.ensure_customer(t)
         except subscriptions.StripeError:
             pass
     return {**store.get_tenant(t["id"]), "api_key": store.issue_key(t["id"])}  # shown once
+
+
+@admin.get("/tenants")
+def find_tenant(email: str):
+    """Look a tenant up by the email it signed up with, e.g. to issue a lost key when mail recovery is not set up
+    (then POST /admin/tenants/{id}/keys)."""
+    try:
+        t = store.tenant_for_email(store.clean_email(email))
+    except ValueError as e:
+        raise _bad(e)
+    if not t:
+        raise HTTPException(status_code=404, detail="no such tenant")
+    return t
 
 
 @admin.patch("/tenants/{tid}")

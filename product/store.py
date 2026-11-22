@@ -2,6 +2,7 @@
 API keys are random 256-bit tokens, so a plain SHA-256 digest is sufficient (no password stretching)."""
 import hashlib
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -12,7 +13,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS tenants (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, plan TEXT NOT NULL DEFAULT 'free',
   stripe_customer_id TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
-  stripe_subscription_id TEXT, subscription_status TEXT);
+  stripe_subscription_id TEXT, subscription_status TEXT, email TEXT);
 CREATE TABLE IF NOT EXISTS stripe_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, received_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS api_keys (
   key_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), prefix TEXT NOT NULL,
@@ -26,7 +27,31 @@ CREATE INDEX IF NOT EXISTS rate_hits_tenant_ts ON rate_hits(tenant_id, ts);
 CREATE TABLE IF NOT EXISTS slack_links (team_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id));
 CREATE TABLE IF NOT EXISTS signup_hits (ip TEXT NOT NULL, ts REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS signup_hits_ts ON signup_hits(ts);
+CREATE TABLE IF NOT EXISTS recover_hits (ip TEXT NOT NULL, ts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS recover_hits_ts ON recover_hits(ts);
+CREATE TABLE IF NOT EXISTS recovery_tokens (
+  token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
+CREATE INDEX IF NOT EXISTS recovery_tokens_tenant ON recovery_tokens(tenant_id, created_at);
 """
+
+RECOVERY_TTL = 1800  # seconds a recovery link stays valid
+RECOVERY_COOLDOWN = 600  # at most one recovery email per tenant in this window (stops mailbombing a registered address)
+
+
+class EmailTaken(Exception):
+    pass
+
+
+def clean_email(value) -> str:
+    """Normalised (trimmed, lower-case) address, or ValueError. Deliberately loose: the only real check is
+    that a recovery email reaches it. No whitespace is allowed, which also rules out header injection."""
+    if not isinstance(value, str):
+        raise ValueError("'email' is required")
+    email = value.strip().lower()
+    if len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError("'email' must be a valid email address")
+    return email
 
 
 def db_path() -> str:
@@ -34,14 +59,16 @@ def db_path() -> str:
 
 
 def _migrate(c) -> None:
-    """Databases created before the Stripe lifecycle lack these tenant columns."""
+    """Databases created before the Stripe lifecycle / key recovery lack these tenant columns."""
     have = {r[1] for r in c.execute("PRAGMA table_info(tenants)")}
-    for col in ("stripe_subscription_id", "subscription_status"):
+    for col in ("stripe_subscription_id", "subscription_status", "email"):
         if col not in have:
             try:
                 c.execute(f"ALTER TABLE tenants ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:  # another process added it first
                 pass
+    # Emails are stored normalised, so a plain unique index is case-insensitive; NULLs (older tenants) never clash.
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS tenants_email_uq ON tenants(email)")
 
 
 @contextmanager
@@ -69,18 +96,29 @@ def month_start(now: float | None = None) -> float:
     return datetime(d.year, d.month, 1, tzinfo=timezone.utc).timestamp()
 
 
-def create_tenant(name: str, plan: str = "free") -> dict:
+def create_tenant(name: str, plan: str = "free", email: str | None = None) -> dict:
+    """`email` must already be normalised (clean_email). Raises EmailTaken if another tenant has it."""
     from product.plans import get_plan
     get_plan(plan)  # validates
     tid = "ten_" + secrets.token_hex(8)
-    with conn() as c:
-        c.execute("INSERT INTO tenants(id,name,plan,created_at) VALUES(?,?,?,?)", (tid, name, plan, time.time()))
-    return {"id": tid, "name": name, "plan": plan}
+    try:
+        with conn() as c:
+            c.execute("INSERT INTO tenants(id,name,plan,created_at,email) VALUES(?,?,?,?,?)",
+                      (tid, name, plan, time.time(), email))
+    except sqlite3.IntegrityError:  # the only unique column besides the random id is email
+        raise EmailTaken(email)
+    return {"id": tid, "name": name, "plan": plan, **({"email": email} if email else {})}
 
 
 def get_tenant(tid: str) -> dict | None:
     with conn() as c:
         r = c.execute("SELECT * FROM tenants WHERE id=?", (tid,)).fetchone()
+    return dict(r) if r else None
+
+
+def tenant_for_email(email: str) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM tenants WHERE email=?", (email,)).fetchone()
     return dict(r) if r else None
 
 
@@ -110,13 +148,50 @@ def clear_subscription(tid: str, status: str) -> None:
         c.execute("UPDATE tenants SET stripe_subscription_id=NULL, subscription_status=? WHERE id=?", (status, tid))
 
 
+def _insert_key(c, tid: str) -> str:
+    key = "adk_" + secrets.token_urlsafe(32)
+    c.execute("INSERT INTO api_keys(key_hash,tenant_id,prefix,created_at) VALUES(?,?,?,?)",
+              (hash_key(key), tid, key[:8], time.time()))
+    return key
+
+
 def issue_key(tid: str) -> str:
     """Returns the plaintext key once; only its hash is stored."""
-    key = "adk_" + secrets.token_urlsafe(32)
     with conn() as c:
-        c.execute("INSERT INTO api_keys(key_hash,tenant_id,prefix,created_at) VALUES(?,?,?,?)",
-                  (hash_key(key), tid, key[:8], time.time()))
-    return key
+        return _insert_key(c, tid)
+
+
+def start_recovery(tid: str) -> str | None:
+    """Single-use recovery token for the tenant (plaintext returned once, only its hash is stored), or None if
+    one was already issued within RECOVERY_COOLDOWN. A new token replaces the tenant's older ones."""
+    now = time.time()
+    token = secrets.token_urlsafe(32)
+    with conn(immediate=True) as c:
+        if c.execute("SELECT 1 FROM recovery_tokens WHERE tenant_id=? AND created_at>?",
+                     (tid, now - RECOVERY_COOLDOWN)).fetchone():
+            return None
+        c.execute("DELETE FROM recovery_tokens WHERE tenant_id=? OR expires_at<=?", (tid, now))
+        c.execute("INSERT INTO recovery_tokens(token_hash,tenant_id,created_at,expires_at) VALUES(?,?,?,?)",
+                  (hash_key(token), tid, now, now + RECOVERY_TTL))
+    return token
+
+
+def redeem_recovery(token: str) -> tuple[dict, str] | None:
+    """Spend a recovery token: revoke every key the tenant has and issue one new key, atomically.
+    Returns (tenant, plaintext key), or None if the token is unknown, used, expired or the tenant is inactive."""
+    now = time.time()
+    with conn(immediate=True) as c:
+        r = c.execute("SELECT r.tenant_id FROM recovery_tokens r JOIN tenants t ON t.id=r.tenant_id "
+                      "WHERE r.token_hash=? AND r.used_at IS NULL AND r.expires_at>? AND t.active=1",
+                      (hash_key(token), now)).fetchone()
+        if not r:
+            return None
+        tid = r["tenant_id"]
+        c.execute("UPDATE recovery_tokens SET used_at=? WHERE token_hash=?", (now, hash_key(token)))
+        c.execute("UPDATE api_keys SET revoked_at=? WHERE tenant_id=? AND revoked_at IS NULL", (now, tid))
+        key = _insert_key(c, tid)
+        tenant = dict(c.execute("SELECT * FROM tenants WHERE id=?", (tid,)).fetchone())
+    return tenant, key
 
 
 def revoke_key(prefix_or_key: str, tid: str) -> int:
@@ -158,18 +233,27 @@ def rate_hit(tid: str, limit: int, window: float = 60.0) -> bool:
         return True
 
 
+def _hit(table: str, ip: str, per_ip_hour: int, per_day: int) -> bool:
+    now = time.time()
+    with conn(immediate=True) as c:  # `table` is always one of our own constants, never user input
+        c.execute(f"DELETE FROM {table} WHERE ts<=?", (now - 86400,))
+        if c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] >= per_day:
+            return False
+        if c.execute(f"SELECT COUNT(*) FROM {table} WHERE ip=? AND ts>?", (ip, now - 3600)).fetchone()[0] >= per_ip_hour:
+            return False
+        c.execute(f"INSERT INTO {table}(ip,ts) VALUES(?,?)", (ip, now))
+        return True
+
+
 def signup_hit(ip: str, per_ip_hour: int, per_day: int) -> bool:
     """Anti-abuse for public signup. Records the attempt and returns True if this IP is under its hourly
     limit and the whole deployment is under its daily limit; a refused attempt is not recorded."""
-    now = time.time()
-    with conn(immediate=True) as c:
-        c.execute("DELETE FROM signup_hits WHERE ts<=?", (now - 86400,))
-        if c.execute("SELECT COUNT(*) FROM signup_hits").fetchone()[0] >= per_day:
-            return False
-        if c.execute("SELECT COUNT(*) FROM signup_hits WHERE ip=? AND ts>?", (ip, now - 3600)).fetchone()[0] >= per_ip_hour:
-            return False
-        c.execute("INSERT INTO signup_hits(ip,ts) VALUES(?,?)", (ip, now))
-        return True
+    return _hit("signup_hits", ip, per_ip_hour, per_day)
+
+
+def recover_hit(ip: str, per_ip_hour: int, per_day: int) -> bool:
+    """Same limiter for key-recovery requests, with its own counters so signups and recoveries don't share a budget."""
+    return _hit("recover_hits", ip, per_ip_hour, per_day)
 
 
 def link_slack(tid: str, team_id: str) -> None:

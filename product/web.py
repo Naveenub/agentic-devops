@@ -1,27 +1,36 @@
 """Customer-facing layer: public pricing page, self-serve signup and an account/billing page.
 
-  GET  /pricing    plans, included usage, what is purchasable (HTML, public)
-  GET  /signup     signup form (HTML, public)      POST /signup {"name": "..."} -> tenant on `free` + API key (once)
+  GET  /pricing    plans, included usage, prices (read from Stripe), what is purchasable (HTML, public)
+  GET  /signup     signup form (HTML, public)
+  POST /signup     {"name": "...", "email": "..."} -> tenant on `free` + API key (once)
+  GET  /recover    lost key: ask for an emailed link, or (from the link) create a new key (HTML, public)
+  POST /recover    {"email": "..."} -> 202 whether or not the address is registered; a one-time link is emailed if it is
+  POST /recover/confirm {"token": "..."} -> new API key (once); every older key of that tenant is revoked
   GET  /account    paste your API key: usage, upgrade (Stripe Checkout) and "Manage billing" (Stripe portal)
   GET  /billing    JSON state the account page renders (tenant auth, X-API-Key)
 
 Paying is the existing flow: /account calls POST /billing/checkout and POST /billing/portal.
 
-  PRODUCT_SIGNUP=off            close public signup (POST /signup -> 403; operators still use POST /admin/tenants)
+  PRODUCT_SIGNUP=on             open public signup. Closed unless set: every free account can spend the server's LLM
+                                tokens, so opening it is the operator's call. (POST /signup -> 403 while closed;
+                                operators still use POST /admin/tenants.)
   PRODUCT_SIGNUP_PER_IP_HOUR    default 5     PRODUCT_SIGNUP_PER_DAY   default 200 (whole deployment)
+  PRODUCT_RECOVER_PER_IP_HOUR   default 5     PRODUCT_RECOVER_PER_DAY  default 200 (whole deployment)
   PRODUCT_TRUST_PROXY=1         take the client IP from the last X-Forwarded-For entry (set only behind a proxy
-                                that appends it, else callers can spoof their IP and dodge the per-IP limit)
+                                that appends it, else callers can spoof their IP and dodge the per-IP limits)
   PRODUCT_CONTACT_URL           where plans that cannot be bought online (e.g. enterprise) send people
-  PRODUCT_PLANS                 may carry "price_label" per plan, e.g. {"pro": {"price_label": "$99 / month"}}"""
+  PRODUCT_PLANS                 "price_label" per plan overrides the price read from Stripe, e.g.
+                                {"pro": {"price_label": "$99 / month"}}
+Key recovery needs outbound mail (PRODUCT_SMTP_*, PRODUCT_PUBLIC_URL; see mailer.py); without it /recover answers 503."""
 import html
 import json
 import os
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from product import store, subscriptions
+from product import mailer, store, subscriptions
 from product.admin import require_enabled
 from product.auth import current_tenant
 from product.plans import _load
@@ -46,6 +55,11 @@ def _ordered_plans() -> list:
     return [plans[n] for n in names]
 
 
+def signup_open() -> bool:
+    """Closed unless the operator opts in (see module docstring)."""
+    return (os.getenv("PRODUCT_SIGNUP") or "").lower() in ("on", "1", "true", "yes", "open")
+
+
 def _client_ip(request: Request) -> str:
     if os.getenv("PRODUCT_TRUST_PROXY") == "1":
         fwd = request.headers.get("x-forwarded-for", "").split(",")[-1].strip()
@@ -58,9 +72,10 @@ def _client_ip(request: Request) -> str:
 
 @web_router.post("/signup")
 def signup(payload: dict, request: Request):
-    """Public. Always creates a `free` tenant (paid plans go through Checkout, after the webhook confirms).
+    """Public, and only while the operator has opened signup. Always creates a `free` tenant (paid plans go
+    through Checkout, after the webhook confirms). The email is required: it is the only way to recover a lost key.
     No Stripe call here, so anonymous traffic cannot create Stripe customers."""
-    if (os.getenv("PRODUCT_SIGNUP") or "").lower() in ("off", "0", "false", "no"):
+    if not signup_open():
         raise HTTPException(status_code=403, detail="signup is closed")
     name = payload.get("name")
     if not isinstance(name, str) or not name.strip():
@@ -68,11 +83,64 @@ def signup(payload: dict, request: Request):
     name = " ".join(name.split())
     if len(name) > 100:
         raise HTTPException(status_code=422, detail="'name' must be 100 characters or fewer")
+    try:
+        email = store.clean_email(payload.get("email"))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     if not store.signup_hit(_client_ip(request), _int_env("PRODUCT_SIGNUP_PER_IP_HOUR", 5),
                             _int_env("PRODUCT_SIGNUP_PER_DAY", 200)):
         raise HTTPException(status_code=429, detail="too many signups, try again later", headers={"Retry-After": "3600"})
-    t = store.create_tenant(name, "free")
+    try:
+        t = store.create_tenant(name, "free", email)
+    except store.EmailTaken:
+        raise HTTPException(status_code=409, detail="an account with that email already exists; " + (
+            "use key recovery to get a new key" if mailer.configured() else "ask the operator for a new key"))
     return {**t, "api_key": store.issue_key(t["id"])}  # shown once
+
+
+RECOVERY_ACK = (f"If that email is registered, a recovery link is on its way. "
+                f"It is valid for {store.RECOVERY_TTL // 60} minutes and works once.")
+
+
+def _send_recovery(email: str, token: str) -> None:
+    link = f"{mailer.public_url()}/recover#t={token}"  # fragment: never sent to a server, so never logged or leaked in Referer
+    mailer.send_quietly(
+        email, "Recover your DevOps AI Agent API key",
+        "Someone asked to recover the API key for the account registered to this address.\n\n"
+        f"Open this link within {store.RECOVERY_TTL // 60} minutes to create a new key:\n{link}\n\n"
+        "The link works once. Creating a new key revokes every existing key on the account.\n"
+        "If you did not ask for this, ignore this email: nothing changes unless the link is opened.\n")
+
+
+@web_router.post("/recover", status_code=202)
+def recover(payload: dict, request: Request, background: BackgroundTasks):
+    """Public. Identical answer whether or not the address is registered (and the mail goes out after the
+    response), so it cannot be used to find out who has an account."""
+    if not mailer.configured():
+        raise HTTPException(status_code=503, detail="key recovery by email is not set up; ask the operator for a new key")
+    try:
+        email = store.clean_email(payload.get("email"))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if not store.recover_hit(_client_ip(request), _int_env("PRODUCT_RECOVER_PER_IP_HOUR", 5),
+                             _int_env("PRODUCT_RECOVER_PER_DAY", 200)):
+        raise HTTPException(status_code=429, detail="too many recovery requests, try again later", headers={"Retry-After": "3600"})
+    t = store.tenant_for_email(email)
+    token = store.start_recovery(t["id"]) if t and t["active"] else None
+    if token:
+        background.add_task(_send_recovery, email, token)
+    return {"status": RECOVERY_ACK}
+
+
+@web_router.post("/recover/confirm")
+def recover_confirm(payload: dict):
+    """Public; the one-time token is the credential. Revokes the tenant's keys and returns a new one (once)."""
+    token = payload.get("token")
+    got = store.redeem_recovery(token) if isinstance(token, str) and 16 <= len(token) <= 200 else None
+    if not got:
+        raise HTTPException(status_code=400, detail="this recovery link is invalid, expired or already used")
+    t, key = got
+    return {"id": t["id"], "name": t["name"], "plan": t["plan"], "api_key": key}  # shown once
 
 
 @web_router.get("/billing")
@@ -107,7 +175,7 @@ label{display:block;font-weight:600;margin:14px 0 6px}.box{max-width:520px}.row{
 code{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:2px 6px;word-break:break-all}
 .msg{margin-top:14px;min-height:1.4em}.err{color:var(--bad)}.ok{color:var(--ok)}
 table{border-collapse:collapse;width:100%;margin-top:10px}td,th{text-align:left;padding:7px 4px;border-bottom:1px solid var(--line)}
-.fine{color:var(--mut);font-size:.88rem;margin-top:22px}[hidden]{display:none!important}
+.fine{color:var(--mut);font-size:.88rem;margin-top:22px}.fine.tight{margin-top:6px}.price .note{font-size:1rem;font-weight:400;color:var(--mut)}[hidden]{display:none!important}
 """
 
 
@@ -133,6 +201,7 @@ def _fmt(n) -> str:
 @web_router.get("/pricing", response_class=HTMLResponse)
 def pricing():
     contact = os.getenv("PRODUCT_CONTACT_URL", "")
+    opened = signup_open()
     cards = []
     for p in _ordered_plans():
         e = html.escape
@@ -140,18 +209,23 @@ def pricing():
         items.append(f"<li>{p.rate_per_minute:,} requests / minute</li>")
         items.append("<li>Usage beyond the included amount is billed</li>" if not p.hard_limit
                      else "<li>Requests stop at the monthly limit</li>")
+        buy = subscriptions.purchasable(p.name)
+        contact_btn = f'<a class="btn alt" href="{e(contact, quote=True)}">Contact us</a>' if contact else ""
         if p.name == "free":
-            cta = '<a class="btn" href="/signup">Start free</a>'
-        elif subscriptions.purchasable(p.name):
-            cta = f'<a class="btn" href="/signup?plan={e(p.name)}">Choose {e(p.name)}</a>'
-        elif contact:
-            cta = f'<a class="btn alt" href="{e(contact, quote=True)}">Contact us</a>'
+            cta = ('<a class="btn" href="/signup">Start free</a>' if opened else
+                   contact_btn or '<a class="btn" aria-disabled="true" href="#">Signup is closed</a>')
+        elif buy:  # with signup closed, only people who already have an account (a key) can upgrade
+            href = f"/signup?plan={e(p.name)}" if opened else f"/account?upgrade={e(p.name)}"
+            cta = f'<a class="btn" href="{href}">Choose {e(p.name)}</a>'
         else:
-            cta = '<a class="btn" aria-disabled="true" href="#">Not available yet</a>'
-        price = e(p.price_label) if p.price_label else ('<span style="font-size:1rem;font-weight:400">Shown at checkout</span>'
-                                                       if subscriptions.purchasable(p.name) else "")
+            cta = contact_btn or '<a class="btn" aria-disabled="true" href="#">Not available yet</a>'
+        # An operator-set label wins; otherwise the price comes from Stripe (cached), else "shown at checkout".
+        label = p.price_label or (subscriptions.stripe_price_label(p.name) if buy else "")
+        price = e(label) if label else ('<span class="note">Shown at checkout</span>' if buy else "")
         cards.append(f'<div class="card"><h2>{e(p.name)}</h2><div class="price">{price}</div><ul>{"".join(items)}</ul>{cta}</div>')
-    body = ('<h1>Pricing</h1><p class="lead">Start on the free plan; upgrade any time from your account page. '
+    lead = ("Start on the free plan; upgrade any time from your account page. " if opened else
+            "Sign-up is closed right now; if you already have an account, upgrade from your account page. ")
+    body = (f'<h1>Pricing</h1><p class="lead">{lead}'
             'Paid plans are billed through Stripe.</p>'
             f'<div class="grid">{"".join(cards)}</div>'
             '<p class="fine">Quotas reset on the first of each month (UTC). Already have a key? <a href="/account">Manage your account</a>.</p>')
@@ -160,27 +234,32 @@ def pricing():
 
 @web_router.get("/signup", response_class=HTMLResponse)
 def signup_page():
-    closed = (os.getenv("PRODUCT_SIGNUP") or "").lower() in ("off", "0", "false", "no")
-    if closed:
+    recoverable = mailer.configured()
+    if not signup_open():
         return _page("Sign up", '<h1>Sign up</h1><p class="lead">Signup is currently closed. '
-                                '<a href="/pricing">See pricing</a> or contact us for access.</p>')
+                                '<a href="/pricing">See pricing</a> or contact us for access.'
+                                + (' Lost your key? <a href="/recover">Recover it by email</a>.' if recoverable else "") + '</p>')
+    lost = ('Lost it? <a href="/recover">Recover it with the email you signed up with</a>.' if recoverable
+            else 'Lost it? Ask the operator for a new key, quoting the email you signed up with.')
     body = ('<h1>Create your account</h1><p class="lead">You get an API key right away on the free plan. No card needed.</p>'
             '<form id="f" class="box"><label for="name">Team or company name</label>'
             '<input id="name" name="name" maxlength="100" required autocomplete="organization">'
+            '<label for="email">Email</label>'
+            '<input id="email" name="email" type="email" maxlength="254" required autocomplete="email">'
+            '<p class="fine tight">Only used to recover a lost key. No marketing.</p>'
             '<div class="row"><button type="submit">Create account</button></div>'
             '<div id="msg" class="msg" role="status"></div></form>'
             '<div id="done" class="box" hidden><p>Your API key (shown once, copy it now):</p><p><code id="key"></code></p>'
             '<div class="row"><button id="copy" class="alt" type="button">Copy key</button>'
             '<a id="next" class="btn" href="/account">Go to your account</a></div>'
-            '<p class="fine">Send it as the <code>X-API-Key</code> header. Lost it? There is no recovery yet: '
-            'create a new account or ask the operator for a new key.</p></div>')
+            f'<p class="fine">Send it as the <code>X-API-Key</code> header. {lost}</p></div>')
     script = """
 const $=id=>document.getElementById(id);
 const want=new URLSearchParams(location.search).get('plan')||'';
 $('f').addEventListener('submit',async ev=>{
   ev.preventDefault();$('msg').className='msg';$('msg').textContent='Creating…';
   try{
-    const r=await fetch('/signup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('name').value})});
+    const r=await fetch('/signup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('name').value,email:$('email').value})});
     const b=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(typeof b.detail==='string'?b.detail:'Signup failed ('+r.status+')');
     try{sessionStorage.setItem('adk_key',b.api_key)}catch(e){}
@@ -191,6 +270,57 @@ $('f').addEventListener('submit',async ev=>{
 $('copy').addEventListener('click',()=>{navigator.clipboard&&navigator.clipboard.writeText($('key').textContent)});
 """
     return _page("Sign up", body, script, cache=False)
+
+
+@web_router.get("/recover", response_class=HTMLResponse)
+def recover_page():
+    if not mailer.configured():
+        return _page("Recover your key", '<h1>Recover your API key</h1><p class="lead">Recovery by email is not set up on '
+                                         'this server. Ask the operator for a new key, quoting the email you signed up with.</p>')
+    body = ('<h1>Recover your API key</h1>'
+            f'<form id="ask" class="box"><p class="lead">Enter the email you signed up with. We will send a one-time link, '
+            f'valid for {store.RECOVERY_TTL // 60} minutes.</p>'
+            '<label for="email">Email</label><input id="email" name="email" type="email" maxlength="254" required autocomplete="email">'
+            '<div class="row"><button type="submit">Email me a link</button></div></form>'
+            '<div id="redeem" class="box" hidden><p class="lead">Creating a new key <b>revokes all your existing keys</b>: '
+            'anything still using an old key stops working until you give it the new one.</p>'
+            '<div class="row"><button id="go" type="button">Create a new key</button></div></div>'
+            '<div id="done" class="box" hidden><p>Your new API key (shown once, copy it now):</p><p><code id="key"></code></p>'
+            '<div class="row"><button id="copy" class="alt" type="button">Copy key</button>'
+            '<a class="btn" href="/account">Go to your account</a></div></div>'
+            '<div id="msg" class="msg box" role="status"></div>')
+    script = """
+const $=id=>document.getElementById(id);
+const say=(t,cls)=>{$('msg').className='msg box '+(cls||'');$('msg').textContent=t};
+let tok='';
+function pick(){  // also on hashchange: pasting the emailed link into a tab that already shows /recover only changes the fragment
+  const t=new URLSearchParams(location.hash.slice(1)).get('t')||'';
+  if(!t)return;
+  tok=t;history.replaceState(null,'',location.pathname);
+  $('ask').hidden=true;$('done').hidden=true;$('redeem').hidden=false;say('');
+}
+pick();addEventListener('hashchange',pick);
+async function post(path,body){
+  const r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  const b=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(typeof b.detail==='string'?b.detail:'Request failed ('+r.status+')');
+  return b;
+}
+$('ask').addEventListener('submit',async ev=>{
+  ev.preventDefault();say('Sending…');
+  try{const b=await post('/recover',{email:$('email').value});say(b.status,'ok')}catch(e){say(e.message,'err')}
+});
+$('go').addEventListener('click',async()=>{
+  say('Creating…');
+  try{
+    const b=await post('/recover/confirm',{token:tok});
+    try{sessionStorage.setItem('adk_key',b.api_key)}catch(e){}
+    $('key').textContent=b.api_key;$('redeem').hidden=true;$('done').hidden=false;say('');
+  }catch(e){$('redeem').hidden=true;$('ask').hidden=false;say(e.message+'. Request a new link below.','err')}
+});
+$('copy').addEventListener('click',()=>{navigator.clipboard&&navigator.clipboard.writeText($('key').textContent)});
+"""
+    return _page("Recover your key", body, script, cache=False)
 
 
 @web_router.get("/account", response_class=HTMLResponse)

@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from product import billing, store
+from product import billing, mailer, store
 
 
 @pytest.fixture
@@ -10,8 +10,20 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("PRODUCT_DB", str(tmp_path / "p.db"))
     monkeypatch.setenv("PRODUCT_ADMIN_KEY", "adm")
     monkeypatch.setenv("AGENT_LLM", "off")
+    monkeypatch.setenv("PRODUCT_SIGNUP", "on")  # signup is closed unless opened; most tests need it open
     monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    for k in ("PRODUCT_SMTP_HOST", "PRODUCT_SMTP_FROM", "PRODUCT_PUBLIC_URL", "STRIPE_SECRET_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    subscriptions.clear_price_cache()  # the label cache is process-wide; tests must not see each other's prices
     return TestClient(app), monkeypatch
+
+
+_n = iter(range(10**6))
+
+
+def _signup(c, name="acme", email=None, **headers):
+    """POST /signup with a unique email unless one is given (emails are unique per tenant)."""
+    return c.post("/signup", json={"name": name, "email": email or f"user{next(_n)}@example.com"}, headers=headers)
 
 
 def _tenant(c, plan="free", name="acme"):
@@ -409,6 +421,11 @@ def test_old_database_is_migrated(tmp_path, monkeypatch):
         "INSERT INTO tenants VALUES('ten_1','a','pro','cus_1',1,0);")
     monkeypatch.setenv("PRODUCT_DB", str(db))
     assert store.get_tenant("ten_1")["subscription_status"] is None
+    assert store.get_tenant("ten_1")["email"] is None  # tenants from before key recovery have none, and may share that
+    assert store.create_tenant("b", "free", "b@example.com")["email"] == "b@example.com"
+    store.create_tenant("c")  # a second tenant without an email is fine: NULLs never collide
+    with store.conn() as db:
+        assert {r[1] for r in db.execute("PRAGMA index_list(tenants)")} >= {"tenants_email_uq"}
 
 
 # ---- self-serve: pricing, signup, account/billing page ------------------------------------------
@@ -423,10 +440,11 @@ def test_web_pages_hidden_in_core_mode(monkeypatch):
 
 def test_signup_creates_free_tenant_and_working_key(env):
     c, _ = env
-    r = c.post("/signup", json={"name": "  Acme   Corp "})
+    r = _signup(c, name="  Acme   Corp ", email="  Ops@Example.COM ")
     assert r.status_code == 200
     t = r.json()
     assert t["plan"] == "free" and t["name"] == "Acme Corp" and t["api_key"].startswith("adk_")
+    assert t["email"] == "ops@example.com"  # stored normalised, so recovery matches however it is typed
     assert _ask(c, t["api_key"]).status_code == 200
     assert c.get("/usage", headers={"x-api-key": t["api_key"]}).json()["plan"] == "free"
     with store.conn() as db:  # plaintext key is never stored; no Stripe customer is made for anonymous signups
@@ -436,29 +454,52 @@ def test_signup_creates_free_tenant_and_working_key(env):
 
 def test_signup_ignores_requested_plan_and_validates(env):
     c, _ = env
-    assert c.post("/signup", json={"name": "x", "plan": "enterprise"}).json()["plan"] == "free"
-    assert c.post("/signup", json={}).status_code == 422
-    assert c.post("/signup", json={"name": "   "}).status_code == 422
-    assert c.post("/signup", json={"name": 5}).status_code == 422
-    assert c.post("/signup", json={"name": "x" * 101}).status_code == 422
+    ok = {"name": "x", "email": "a@example.com"}
+    assert c.post("/signup", json={**ok, "plan": "enterprise"}).json()["plan"] == "free"
+    assert c.post("/signup", json={"email": "b@example.com"}).status_code == 422
+    assert c.post("/signup", json={"name": "   ", "email": "b@example.com"}).status_code == 422
+    assert c.post("/signup", json={"name": 5, "email": "b@example.com"}).status_code == 422
+    assert c.post("/signup", json={"name": "x" * 101, "email": "b@example.com"}).status_code == 422
+
+
+def test_signup_requires_a_valid_unique_email(env):
+    c, _ = env
+    for bad in (None, "", "   ", "nope", "a@b", "a b@example.com", "a@@example.com", 5, "x" * 250 + "@example.com",
+                "a@example.com\r\nBcc: evil@example.com"):
+        r = c.post("/signup", json={"name": "x", "email": bad})
+        assert r.status_code == 422, bad
+    assert c.post("/signup", json={"name": "x"}).status_code == 422
+    assert _signup(c, email="dup@example.com").status_code == 200
+    dup = _signup(c, name="other", email="DUP@example.com")  # same address, different case
+    assert dup.status_code == 409 and "already exists" in dup.json()["detail"]
+    assert "key recovery" not in dup.json()["detail"]  # mail not configured: points at the operator instead
+    with store.conn() as db:
+        assert db.execute("SELECT COUNT(*) FROM tenants").fetchone()[0] == 1  # the refused signup left nothing behind
 
 
 def test_signup_rate_limited_per_ip_and_per_day(env):
     c, mp = env
     mp.setenv("PRODUCT_SIGNUP_PER_IP_HOUR", "2")
-    assert [c.post("/signup", json={"name": "a"}).status_code for _ in range(3)] == [200, 200, 429]
+    assert [_signup(c).status_code for _ in range(3)] == [200, 200, 429]
     mp.setenv("PRODUCT_TRUST_PROXY", "1")  # a different (proxy-reported) client gets its own allowance
-    assert c.post("/signup", json={"name": "b"}, headers={"x-forwarded-for": "1.2.3.4"}).status_code == 200
+    assert _signup(c, **{"x-forwarded-for": "1.2.3.4"}).status_code == 200
     mp.setenv("PRODUCT_SIGNUP_PER_DAY", "3")  # ...but the deployment-wide cap still applies
-    assert c.post("/signup", json={"name": "c"}, headers={"x-forwarded-for": "5.6.7.8"}).status_code == 429
+    assert _signup(c, **{"x-forwarded-for": "5.6.7.8"}).status_code == 429
 
 
-def test_signup_can_be_closed(env):
+def test_signup_is_closed_unless_the_operator_opens_it(env):
     c, mp = env
-    mp.setenv("PRODUCT_SIGNUP", "off")
-    assert c.post("/signup", json={"name": "x"}).status_code == 403
-    assert "closed" in c.get("/signup").text
+    for value in (None, "", "off", "0", "false", "maybe"):  # anything but an explicit yes stays closed
+        mp.delenv("PRODUCT_SIGNUP", raising=False)
+        if value is not None:
+            mp.setenv("PRODUCT_SIGNUP", value)
+        assert _signup(c).status_code == 403, value
+        assert "closed" in c.get("/signup").text
+        assert "<form" not in c.get("/signup").text
     assert _tenant(c)["plan"] == "free"  # operators can still provision
+    for value in ("on", "1", "true", "yes", "OPEN"):
+        mp.setenv("PRODUCT_SIGNUP", value)
+        assert _signup(c).status_code == 200, value
 
 
 def test_pricing_page_lists_plans_and_only_offers_what_can_be_bought(stripe_env):
@@ -486,7 +527,7 @@ def test_pricing_page_escapes_configured_text(env):
 
 def test_html_pages_are_locked_down(env):
     c, _ = env
-    for path in ("/pricing", "/signup", "/account"):
+    for path in ("/pricing", "/signup", "/account", "/recover"):
         r = c.get(path)
         assert r.status_code == 200
         csp = r.headers["content-security-policy"]
@@ -502,7 +543,7 @@ def test_billing_state_drives_the_account_page(stripe_env, monkeypatch):
     c, mp, calls, fake = stripe_env
     monkeypatch.setattr(subscriptions.httpx, "post", lambda url, data, headers, auth, timeout: fake(url, data, headers))
     assert c.get("/billing").status_code == 401
-    t = c.post("/signup", json={"name": "acme"}).json()
+    t = _signup(c).json()
     h = {"x-api-key": t["api_key"]}
     s = c.get("/billing", headers=h).json()
     assert s["plan"] == "free" and s["purchasable"] == ["starter", "pro"]
@@ -522,6 +563,340 @@ def test_billing_state_drives_the_account_page(stripe_env, monkeypatch):
 
 def test_billing_state_without_stripe_offers_nothing(env):
     c, _ = env
-    t = c.post("/signup", json={"name": "acme"}).json()
+    t = _signup(c).json()
     s = c.get("/billing", headers={"x-api-key": t["api_key"]}).json()
     assert s["purchasable"] == [] and s["can_manage"] is False
+
+
+# ---- prices on /pricing are read from Stripe ----------------------------------------------------
+
+import re as _re
+
+import httpx as _httpx
+
+
+def _price(amount, cur="usd", interval="month", metered=False, count=1, **extra):
+    return {"unit_amount": None if metered else amount, "currency": cur,
+            "recurring": {"interval": interval, "interval_count": count, "usage_type": "metered" if metered else "licensed"},
+            **extra}
+
+
+@pytest.fixture
+def stripe_prices(stripe_env, monkeypatch):
+    c, mp, _, _ = stripe_env
+    table = {"price_starter": _price(4900), "price_pro": _price(9900), "price_use": _price(None, metered=True)}
+    seen = []
+
+    def fake_get(url, auth, timeout):
+        seen.append(url)
+        pid = url.rsplit("/", 1)[-1]
+        return _R(table[pid]) if pid in table else _R({}, 404)
+
+    monkeypatch.setattr(subscriptions.httpx, "get", fake_get)
+    return c, mp, table, seen
+
+
+def test_pricing_shows_prices_read_from_stripe_and_caches_them(stripe_prices):
+    c, _, _, seen = stripe_prices
+    page = c.get("/pricing").text
+    assert "$49 / month" in page and "$99 / month + usage" in page and "Shown at checkout" not in page
+    assert sorted(seen) == ["https://api.stripe.com/v1/prices/price_pro", "https://api.stripe.com/v1/prices/price_starter",
+                            "https://api.stripe.com/v1/prices/price_use"]
+    c.get("/pricing"), c.get("/pricing")
+    assert len(seen) == 3  # a public page must not turn every view into Stripe calls
+
+
+def test_configured_price_label_beats_stripe(stripe_prices):
+    c, mp, _, seen = stripe_prices
+    mp.setenv("PRODUCT_PLANS", '{"starter": {"price_label": "From $39"}}')
+    page = c.get("/pricing").text
+    assert "From $39" in page and "$49 / month" not in page and "$99 / month + usage" in page
+    assert not any(u.endswith("price_starter") for u in seen)
+
+
+def test_pricing_survives_stripe_trouble_and_does_not_hammer_it(stripe_env, monkeypatch):
+    c, _, _, _ = stripe_env
+    calls = []
+
+    def down(url, auth, timeout):
+        calls.append(url)
+        raise _httpx.ConnectError("no route")
+
+    monkeypatch.setattr(subscriptions.httpx, "get", down)
+    for _ in range(3):
+        r = c.get("/pricing")
+        assert r.status_code == 200 and r.text.count("Shown at checkout") == 2  # starter and pro
+    assert len(calls) == 1  # one failed attempt, then a back-off, not one per plan per view
+    subscriptions.clear_price_cache()
+    for bad in (_R({}, 500), _R({}, 404)):
+        monkeypatch.setattr(subscriptions.httpx, "get", lambda url, auth, timeout, bad=bad: bad)
+        assert "Shown at checkout" in c.get("/pricing").text
+        subscriptions.clear_price_cache()
+
+    class NotJson:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("not json")
+
+    monkeypatch.setattr(subscriptions.httpx, "get", lambda url, auth, timeout: NotJson())
+    assert "Shown at checkout" in c.get("/pricing").text
+
+
+def test_price_label_cache_expires_and_backs_off(stripe_env):
+    subscriptions.clear_price_cache()
+    calls = []
+
+    def get(url):
+        calls.append(url)
+        return _R(_price(4900))
+
+    label = subscriptions.stripe_price_label
+    assert label("starter", get=get, now=1000) == "$49 / month"
+    assert label("starter", get=get, now=1000 + subscriptions.PRICE_TTL - 1) == "$49 / month" and len(calls) == 1
+    assert label("starter", get=get, now=1000 + subscriptions.PRICE_TTL + 1) == "$49 / month" and len(calls) == 2
+    assert label("free", get=get, now=0) == "" and label("enterprise", get=get, now=0) == ""  # not purchasable: no lookup
+
+    subscriptions.clear_price_cache()
+
+    def boom(url):
+        raise _httpx.ConnectError("down")
+
+    assert label("starter", get=boom, now=0) == ""
+    n = len(calls)
+    assert label("pro", get=get, now=subscriptions.PRICE_RETRY - 1) == "" and len(calls) == n  # still backing off
+    assert label("pro", get=get, now=subscriptions.PRICE_RETRY + 1) != ""  # recovered
+
+
+def test_price_formatting():
+    money, label = subscriptions._money, subscriptions.label_from_prices
+    assert money(4900, "usd") == "$49" and money(4950, "USD") == "$49.50" and money(5, "usd") == "$0.05"
+    assert money(5000, "jpy") == "¥5,000" and money(1234567, "inr") == "₹12,345.67"
+    assert money(1500, "chf") == "CHF 15" and money(1500, "kwd") == "KWD 1.500"
+    assert label([_price(4900)]) == "$49 / month"
+    assert label([_price(12000, count=3)]) == "$120 / 3 months" and label([_price(49000, interval="year")]) == "$490 / year"
+    assert label([_price(2000), _price(3000)]) == "$50 / month"  # flat prices on one plan add up
+    assert label([_price(9900), _price(None, metered=True)]) == "$99 / month + usage"
+    assert label([_price(None, metered=True)]) == "Usage-based"
+    # no single honest figure -> no label, so the page says "Shown at checkout" instead of guessing
+    assert label([]) == ""
+    assert label([_price(1000), _price(1000, cur="eur")]) == ""
+    assert label([_price(1000), _price(1000, interval="year")]) == ""
+    assert label([{"unit_amount": None, "currency": "usd", "billing_scheme": "tiered",
+                   "recurring": {"interval": "month", "usage_type": "licensed"}}]) == ""
+    assert label([{"unit_amount": 500, "currency": "usd", "recurring": None}]) == ""  # one-time fee
+
+
+def test_stripe_supplied_price_text_is_escaped(stripe_prices):
+    c, _, table, _ = stripe_prices
+    table["price_starter"] = _price(4900, cur="<script>alert(1)</script>")
+    page = c.get("/pricing").text
+    assert "<script>alert(1)" not in page and "&lt;SCRIPT&gt;" in page
+
+
+def test_pricing_when_signup_is_closed_sends_people_to_their_account(stripe_env):
+    c, mp, _, _ = stripe_env
+    mp.delenv("PRODUCT_SIGNUP")
+    page = c.get("/pricing").text
+    assert "Start free" not in page and "/signup?plan=" not in page and "Signup is closed" in page
+    assert 'href="/account?upgrade=starter"' in page and 'href="/account?upgrade=pro"' in page
+    mp.setenv("PRODUCT_CONTACT_URL", "mailto:sales@example.com")
+    assert "Signup is closed" not in c.get("/pricing").text and "Contact us" in c.get("/pricing").text
+
+
+# ---- email at signup and key recovery -----------------------------------------------------------
+
+@pytest.fixture
+def mail_env(env):
+    c, mp = env
+    mp.setenv("PRODUCT_SMTP_HOST", "smtp.test")
+    mp.setenv("PRODUCT_SMTP_FROM", "DevOps <no-reply@example.com>")
+    mp.setenv("PRODUCT_PUBLIC_URL", "https://agent.example.com/")
+    sent = []
+    mp.setattr(mailer, "send", lambda to, subject, body: sent.append((to, subject, body)))
+    return c, mp, sent
+
+
+def _token(sent):
+    return _re.search(r"https://agent\.example\.com/recover#t=([A-Za-z0-9_-]+)", sent[-1][2]).group(1)
+
+
+def _confirm(c, tok):
+    return c.post("/recover/confirm", json={"token": tok})
+
+
+def test_lost_key_is_recovered_by_emailed_link_and_old_keys_die(mail_env):
+    c, _, sent = mail_env
+    t = _signup(c, email="Lost@Example.com").json()
+    extra = c.post(f"/admin/tenants/{t['id']}/keys", headers={"x-admin-key": "adm"}).json()["api_key"]
+    r = c.post("/recover", json={"email": "lost@example.com"})
+    assert r.status_code == 202 and len(sent) == 1 and sent[0][0] == "lost@example.com"
+    assert "revokes every existing key" in sent[0][2] and "30 minutes" in sent[0][2]
+    tok = _token(sent)
+    # an address nobody registered gets the identical answer and no mail, so this cannot be used to probe for accounts
+    r2 = c.post("/recover", json={"email": "nobody@example.com"})
+    assert r2.status_code == 202 and r2.json() == r.json() and len(sent) == 1
+    # merely opening the page (what a mail scanner does) does not spend the link
+    assert c.get("/recover").status_code == 200
+    got = _confirm(c, tok)
+    assert got.status_code == 200 and got.json()["id"] == t["id"] and got.json()["plan"] == "free"
+    new = got.json()["api_key"]
+    assert new.startswith("adk_") and new not in (t["api_key"], extra)
+    assert _ask(c, t["api_key"]).status_code == 401 and _ask(c, extra).status_code == 401  # every old key is revoked
+    assert _ask(c, new).status_code == 200
+    assert _confirm(c, tok).status_code == 400  # single use
+    with store.conn() as db:  # neither the token nor the key is stored in the clear
+        stored = str([tuple(x) for x in db.execute("SELECT * FROM recovery_tokens")]) + \
+            str([tuple(x) for x in db.execute("SELECT * FROM api_keys")])
+        assert tok not in stored and new not in stored
+
+
+def test_recovery_link_expires_replaces_older_links_and_is_throttled(mail_env):
+    c, _, sent = mail_env
+    _signup(c, email="a@example.com")
+    c.post("/recover", json={"email": "a@example.com"})
+    assert len(sent) == 1
+    first = _token(sent)
+    assert c.post("/recover", json={"email": "a@example.com"}).status_code == 202 and len(sent) == 1  # cooldown: no mailbombing
+    with store.conn() as db:
+        db.execute("UPDATE recovery_tokens SET expires_at=?", (_t.time() - 1,))
+    assert _confirm(c, first).status_code == 400  # expired
+    with store.conn() as db:  # past the cooldown, a new request mails a fresh link and retires the old one
+        db.execute("UPDATE recovery_tokens SET created_at=created_at-?", (store.RECOVERY_COOLDOWN + 1,))
+    c.post("/recover", json={"email": "a@example.com"})
+    second = _token(sent)
+    assert len(sent) == 2 and second != first
+    assert _confirm(c, first).status_code == 400 and _confirm(c, second).status_code == 200
+
+
+def test_recovery_validation_inactive_tenants_and_junk_tokens(mail_env):
+    c, _, sent = mail_env
+    t = _signup(c, email="gone@example.com").json()
+    c.patch(f"/admin/tenants/{t['id']}", json={"active": 0}, headers={"x-admin-key": "adm"})
+    assert c.post("/recover", json={"email": "gone@example.com"}).status_code == 202 and sent == []  # deactivated: no mail
+    for bad in ({}, {"email": ""}, {"email": "nope"}, {"email": 5}):
+        assert c.post("/recover", json=bad).status_code == 422
+    for tok in (None, 5, "", "short", "x" * 300, "A" * 43):
+        assert _confirm(c, tok).status_code == 400
+    # a token that was issued before the tenant was deactivated no longer works either
+    t2 = _signup(c, email="soon@example.com").json()
+    c.post("/recover", json={"email": "soon@example.com"})
+    c.patch(f"/admin/tenants/{t2['id']}", json={"active": 0}, headers={"x-admin-key": "adm"})
+    assert _confirm(c, _token(sent)).status_code == 400
+
+
+def test_recovery_requests_are_rate_limited_per_ip(mail_env):
+    c, mp, _ = mail_env
+    mp.setenv("PRODUCT_RECOVER_PER_IP_HOUR", "2")
+    assert [c.post("/recover", json={"email": f"x{i}@example.com"}).status_code for i in range(3)] == [202, 202, 429]
+
+
+def test_recovery_is_off_without_complete_mail_config(env):
+    c, mp = env
+    assert c.post("/recover", json={"email": "a@example.com"}).status_code == 503
+    assert "not set up" in c.get("/recover").text and "<form" not in c.get("/recover").text
+    mp.setenv("PRODUCT_SMTP_HOST", "smtp.test")
+    mp.setenv("PRODUCT_SMTP_FROM", "no-reply@example.com")  # still no PRODUCT_PUBLIC_URL: links would have to trust the Host header
+    assert c.post("/recover", json={"email": "a@example.com"}).status_code == 503
+    mp.setenv("PRODUCT_PUBLIC_URL", "agent.example.com")  # not a URL
+    assert c.post("/recover", json={"email": "a@example.com"}).status_code == 503
+    mp.setenv("PRODUCT_PUBLIC_URL", "https://agent.example.com")
+    assert c.post("/recover", json={"email": "a@example.com"}).status_code == 202
+
+
+def test_recovery_link_ignores_the_host_header(mail_env):
+    c, _, sent = mail_env
+    _signup(c, email="h@example.com")
+    c.post("/recover", json={"email": "h@example.com"}, headers={"host": "evil.example", "x-forwarded-host": "evil.example"})
+    assert "https://agent.example.com/recover#t=" in sent[0][2] and "evil.example" not in sent[0][2]
+
+
+def test_signup_and_recovery_pages_mention_the_right_way_back(mail_env):
+    c, mp, _ = mail_env
+    signup = c.get("/signup").text
+    assert 'name="email"' in signup and 'type="email"' in signup and 'href="/recover"' in signup
+    page = c.get("/recover")
+    assert 'id="ask"' in page.text and "location.hash" in page.text  # the token travels in the fragment, never to a server
+    assert page.headers["cache-control"] == "no-store" and "default-src 'none'" in page.headers["content-security-policy"]
+    _signup(c, email="d@example.com")
+    assert "key recovery" in _signup(c, email="d@example.com").json()["detail"]  # a duplicate points at recovery
+    mp.delenv("PRODUCT_SMTP_HOST")  # without mail, the pages send people to the operator instead of a dead link
+    off = c.get("/signup").text
+    assert 'href="/recover"' not in off and "Ask the operator" in off
+    mp.setenv("PRODUCT_SIGNUP", "off")
+    assert 'href="/recover"' not in c.get("/signup").text  # closed signup page offers recovery only when it works
+
+
+def test_admin_can_find_a_tenant_by_email_and_create_with_one(env):
+    c, _ = env
+    h = {"x-admin-key": "adm"}
+    made = c.post("/admin/tenants", json={"name": "n", "email": " Ops@Example.com "}, headers=h)
+    assert made.status_code == 200 and made.json()["email"] == "ops@example.com"
+    assert c.post("/admin/tenants", json={"name": "n2"}, headers=h).json()["email"] is None  # optional for operators
+    assert c.post("/admin/tenants", json={"name": "n3", "email": "OPS@example.com"}, headers=h).status_code == 409
+    assert c.post("/admin/tenants", json={"name": "n4", "email": "bad"}, headers=h).status_code == 422
+    found = c.get("/admin/tenants", params={"email": "OPS@example.com"}, headers=h)
+    assert found.status_code == 200 and found.json()["id"] == made.json()["id"]
+    assert "api_key" not in found.json()
+    assert c.get("/admin/tenants", params={"email": "no@example.com"}, headers=h).status_code == 404
+    assert c.get("/admin/tenants", params={"email": "bad"}, headers=h).status_code == 422
+    assert c.get("/admin/tenants", params={"email": "ops@example.com"}).status_code == 401  # operator-only
+
+
+class _FakeSMTP:
+    log: list = []
+
+    def __init__(self, host, port, timeout=None, context=None):
+        self.log.append(("connect", type(self).__name__, host, port, timeout))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def starttls(self, context=None):
+        self.log.append(("starttls", context is not None))
+
+    def login(self, user, password):
+        self.log.append(("login", user, password))
+
+    def send_message(self, msg, from_addr=None, to_addrs=None):
+        self.log.append(("send", msg["From"], msg["To"], msg["Subject"], msg.get_content().strip(), from_addr, to_addrs))
+
+
+def test_mailer_speaks_smtp_with_tls_and_login(monkeypatch):
+    _FakeSMTP.log = []
+    monkeypatch.setattr(mailer.smtplib, "SMTP", _FakeSMTP)
+    monkeypatch.setattr(mailer.smtplib, "SMTP_SSL", type("_FakeSSL", (_FakeSMTP,), {}))
+    for k, v in {"PRODUCT_SMTP_HOST": "smtp.test", "PRODUCT_SMTP_PORT": "2525", "PRODUCT_SMTP_USER": "u",
+                 "PRODUCT_SMTP_PASSWORD": "p", "PRODUCT_SMTP_FROM": "DevOps <no-reply@example.com>"}.items():
+        monkeypatch.setenv(k, v)
+    mailer.send("a@example.com", "Hi", "body")
+    assert _FakeSMTP.log == [("connect", "_FakeSMTP", "smtp.test", 2525, 15), ("starttls", True), ("login", "u", "p"),
+                             ("send", "DevOps <no-reply@example.com>", "a@example.com", "Hi", "body",
+                              "no-reply@example.com", ["a@example.com"])]
+    _FakeSMTP.log.clear()
+    monkeypatch.setenv("PRODUCT_SMTP_PORT", "465")  # implicit TLS: no STARTTLS step
+    mailer.send("a@example.com", "Hi", "body")
+    assert _FakeSMTP.log[0][1] == "_FakeSSL" and ("starttls", True) not in _FakeSMTP.log
+    _FakeSMTP.log.clear()
+    monkeypatch.setenv("PRODUCT_SMTP_PORT", "25")
+    monkeypatch.setenv("PRODUCT_SMTP_STARTTLS", "off")
+    monkeypatch.delenv("PRODUCT_SMTP_USER")
+    mailer.send("a@example.com", "Hi", "body")
+    assert [e[0] for e in _FakeSMTP.log] == ["connect", "send"]
+
+
+def test_mail_failure_never_breaks_or_leaks_through_the_recovery_request(mail_env, caplog):
+    c, mp, _ = mail_env
+
+    def broken(to, subject, body):
+        raise OSError("smtp down: " + body)  # a careless error text must not reach the log
+
+    mp.setattr(mailer, "send", broken)
+    _signup(c, email="m@example.com")
+    with caplog.at_level("WARNING", logger="product.mailer"):
+        r = c.post("/recover", json={"email": "m@example.com"})
+    assert r.status_code == 202  # the caller cannot tell a mail failure from success (and could not before either)
+    assert "OSError" in caplog.text and "recover#t=" not in caplog.text and "smtp down" not in caplog.text
