@@ -117,8 +117,9 @@ devops-ai-agent/
 │   ├── nodes/
 │   │   ├── observe.py         # Fetch logs / cluster state
 │   │   ├── diagnose.py        # LLM + RAG reasoning
-│   │   ├── suggest.py         # Fix generation
-│   │   └── Diagnoser Prompt.txt
+│   │   └── suggest.py         # Fix generation
+│   ├── prompts/
+│   │   └── cost_analysis.txt  # Prompt for AWS cost analysis
 │   ├── tools/
 │   │   ├── aws_costs.py
 │   │   ├── kubernetes.py      # Safe kubectl wrapper (read-only)
