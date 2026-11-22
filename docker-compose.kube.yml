@@ -1,10 +1,23 @@
-# Opt-in: gives the container read-only access to your kubeconfig so the agent can run
-# `kubectl logs`. Use:
+# Opt-in: gives the container read-only access to your kubeconfig (and AWS credentials,
+# for EKS) so the agent can run `kubectl logs`. Use:
 #   docker compose -f docker-compose.yml -f docker-compose.kube.yml up --build
-# Override the directory with KUBE_DIR=/path/to/.kube if yours is elsewhere.
+#
+# Directories: KUBE_DIR (default ~/.kube) and AWS_DIR (default ~/.aws).
+# AWS auth, pick one:
+#   - static/temporary keys: export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+#     AWS_SESSION_TOKEN in your shell before `docker compose up` (passed through if set)
+#   - a profile in ~/.aws: export AWS_PROFILE=<name> (SSO profiles: run `aws sso login`
+#     on the host first; the mount is read-only, so the container can't refresh tokens)
 services:
   api:
     environment:
-      KUBECONFIG: /home/app/.kube/config
+      - KUBECONFIG=/home/app/.kube/config
+      - AWS_PROFILE
+      - AWS_REGION
+      - AWS_DEFAULT_REGION
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
     volumes:
       - ${KUBE_DIR:-${HOME}/.kube}:/home/app/.kube:ro
+      - ${AWS_DIR:-${HOME}/.aws}:/home/app/.aws:ro
