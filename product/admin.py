@@ -1,9 +1,9 @@
 """Operator endpoints (X-Admin-Key) and the tenant's own usage view."""
 import os
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from product import billing, metering, store
+from product import billing, metering, store, subscriptions
 from product.auth import current_tenant, require_admin
 
 def require_enabled() -> None:
@@ -28,7 +28,12 @@ def create_tenant(payload: dict):
         t = store.create_tenant(name, payload.get("plan", "free"))
     except KeyError as e:
         raise _bad(e)
-    return {**t, "api_key": store.issue_key(t["id"])}  # shown once
+    if os.getenv("STRIPE_SECRET_KEY"):  # best effort: checkout creates the customer later if this fails
+        try:
+            subscriptions.ensure_customer(t)
+        except subscriptions.StripeError:
+            pass
+    return {**store.get_tenant(t["id"]), "api_key": store.issue_key(t["id"])}  # shown once
 
 
 @admin.patch("/tenants/{tid}")
@@ -87,3 +92,62 @@ def report():
 @tenant_router.get("/usage")
 def my_usage(tenant: dict = Depends(current_tenant)):
     return metering.summary(tenant)
+
+
+def _stripe(fn, *a, **kw):
+    try:
+        return fn(*a, **kw)
+    except subscriptions.StripeError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    except KeyError as e:
+        raise _bad(e)
+
+
+@tenant_router.post("/billing/checkout")
+def checkout(payload: dict, tenant: dict = Depends(current_tenant)):
+    """Start a Stripe Checkout subscription for the calling tenant; the plan changes when the webhook arrives."""
+    plan = payload.get("plan")
+    if not plan:
+        raise HTTPException(status_code=422, detail="'plan' is required")
+    return {"url": _stripe(subscriptions.create_checkout, tenant, plan, payload.get("success_url"),
+                           payload.get("cancel_url"))}
+
+
+@tenant_router.post("/billing/portal")
+def portal(payload: dict | None = None, tenant: dict = Depends(current_tenant)):
+    """Stripe billing portal: update card, change plan, cancel."""
+    return {"url": _stripe(subscriptions.create_portal, tenant, (payload or {}).get("return_url"))}
+
+
+@admin.post("/tenants/{tid}/checkout")
+def admin_checkout(tid: str, payload: dict):
+    t = store.get_tenant(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="no such tenant")
+    plan = payload.get("plan")
+    if not plan:
+        raise HTTPException(status_code=422, detail="'plan' is required")
+    return {"url": _stripe(subscriptions.create_checkout, t, plan, payload.get("success_url"),
+                           payload.get("cancel_url"))}
+
+
+# Not behind X-API-Key or X-Admin-Key: Stripe calls it, and the signature is the authentication.
+webhook_router = APIRouter(dependencies=[Depends(require_enabled)])
+
+
+@webhook_router.post("/stripe/webhook")
+async def stripe_webhook(request: Request):
+    secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if not secret:
+        raise HTTPException(status_code=503, detail="STRIPE_WEBHOOK_SECRET is not configured")
+    body = await request.body()
+    if not subscriptions.verify_signature(body, request.headers.get("stripe-signature"), secret):
+        raise HTTPException(status_code=400, detail="invalid signature")
+    try:
+        event = subscriptions.parse_event(body)
+        result = subscriptions.handle_event(event)
+    except (ValueError, KeyError, TypeError) as e:  # malformed or unmappable: retrying will not help, but surface it
+        raise HTTPException(status_code=422, detail=f"unprocessable event: {e}")
+    except subscriptions.StripeError as e:
+        raise HTTPException(status_code=500, detail=str(e))  # transient: Stripe retries
+    return {"received": True, "result": result}

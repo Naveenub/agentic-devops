@@ -241,9 +241,10 @@ async def slack_command(request: Request, background: BackgroundTasks):
 app.include_router(router)
 
 try:  # commercial layer; absent from the open-core image. Its routes answer 404 unless PRODUCT_DB is set.
-    from product.admin import admin, tenant_router
+    from product.admin import admin, tenant_router, webhook_router
 except ImportError:
     pass
 else:
     app.include_router(admin)
     app.include_router(tenant_router)
+    app.include_router(webhook_router)

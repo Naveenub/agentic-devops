@@ -175,12 +175,13 @@ The open core runs single-tenant with one `AGENT_API_KEY`. Setting `PRODUCT_DB` 
 * **Auth & tenancy:** per-tenant API keys (`X-API-Key`, stored hashed, revocable), tenants created via `POST /admin/tenants` with `X-Admin-Key`.
 * **Plans & limits:** `free` (hard quota), `starter`, `pro`, `enterprise` (overage billed, not blocked); per-minute rate limits; override with `PRODUCT_PLANS`.
 * **Metering:** `analyze` runs, `cost_check` calls and LLM tokens recorded per tenant; `GET /usage` for the tenant, `GET /admin/usage/{tenant}` for you.
-* **Billing:** `POST /admin/billing/report` sends unreported usage to Stripe Billing Meters (idempotent). Set each tenant's `stripe_customer_id` via `PATCH /admin/tenants/{id}`.
+* **Billing:** `POST /admin/billing/report` sends unreported usage to Stripe Billing Meters (idempotent). `PATCH /admin/tenants/{id}` can still override `stripe_customer_id`/`plan` by hand.
+* **Subscriptions:** creating a tenant creates its Stripe customer (when `STRIPE_SECRET_KEY` is set). Tenants self-serve with `POST /billing/checkout {"plan": "pro"}` (returns a Stripe Checkout URL) and `POST /billing/portal` (card, plan change, cancel); `POST /admin/tenants/{id}/checkout` does the same for you. Point a Stripe webhook at `POST /stripe/webhook` (events: `checkout.session.completed`, `customer.subscription.created|updated|deleted`, `invoice.payment_failed`). The plan follows the subscription's price (`STRIPE_PRICE_<PLAN>`); a failed payment keeps the plan while Stripe retries, and cancellation, `unpaid`, or exhausted retries drop the tenant to `free`. Webhooks are signature-verified and idempotent per event id.
 * **Isolation:** inputs that use the server's own kubectl/GitHub/AWS credentials are refused for tenants unless their plan has `shared_tools`; tenants send `"logs": "..."` text instead.
 
 Rate limits are stored in the product DB, so they hold across workers. `/slack/command` is metered too: link a workspace with `PUT /admin/tenants/{id}/slack {"team_id": "T…"}` (unlinked workspaces are refused); its rate limit, quota and shared-tool grant then apply as on the HTTP API (`cost …` needs `shared_tools`).
 
-Not covered: SSO/SAML and a billing portal.
+Not covered: SSO/SAML, seat-based pricing, proration previews.
 
 ---
 

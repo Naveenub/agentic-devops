@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tenants (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, plan TEXT NOT NULL DEFAULT 'free',
-  stripe_customer_id TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL);
+  stripe_customer_id TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
+  stripe_subscription_id TEXT, subscription_status TEXT);
+CREATE TABLE IF NOT EXISTS stripe_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, received_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS api_keys (
   key_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), prefix TEXT NOT NULL,
   created_at REAL NOT NULL, revoked_at REAL);
@@ -29,6 +31,17 @@ def db_path() -> str:
     return os.environ["PRODUCT_DB"]
 
 
+def _migrate(c) -> None:
+    """Databases created before the Stripe lifecycle lack these tenant columns."""
+    have = {r[1] for r in c.execute("PRAGMA table_info(tenants)")}
+    for col in ("stripe_subscription_id", "subscription_status"):
+        if col not in have:
+            try:
+                c.execute(f"ALTER TABLE tenants ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError:  # another process added it first
+                pass
+
+
 @contextmanager
 def conn(immediate: bool = False):
     """immediate=True takes the write lock up front, so read-then-write sequences are atomic across processes."""
@@ -36,6 +49,7 @@ def conn(immediate: bool = False):
     c.row_factory = sqlite3.Row
     try:
         c.executescript(SCHEMA)
+        _migrate(c)
         if immediate:
             c.execute("BEGIN IMMEDIATE")
         yield c
@@ -68,8 +82,11 @@ def get_tenant(tid: str) -> dict | None:
     return dict(r) if r else None
 
 
+TENANT_FIELDS = ("plan", "active", "stripe_customer_id", "stripe_subscription_id", "subscription_status")
+
+
 def update_tenant(tid: str, **fields) -> dict | None:
-    allowed = {k: v for k, v in fields.items() if k in ("plan", "active", "stripe_customer_id") and v is not None}
+    allowed = {k: v for k, v in fields.items() if k in TENANT_FIELDS and v is not None}
     if "plan" in allowed:
         from product.plans import get_plan
         get_plan(allowed["plan"])
@@ -77,6 +94,18 @@ def update_tenant(tid: str, **fields) -> dict | None:
         with conn() as c:
             c.execute(f"UPDATE tenants SET {', '.join(k + '=?' for k in allowed)} WHERE id=?", (*allowed.values(), tid))
     return get_tenant(tid)
+
+
+def tenant_for_customer(customer_id: str) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM tenants WHERE stripe_customer_id=?", (customer_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def clear_subscription(tid: str, status: str) -> None:
+    """update_tenant ignores None, so dropping the subscription id needs its own statement."""
+    with conn() as c:
+        c.execute("UPDATE tenants SET stripe_subscription_id=NULL, subscription_status=? WHERE id=?", (status, tid))
 
 
 def issue_key(tid: str) -> str:

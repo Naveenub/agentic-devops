@@ -212,3 +212,196 @@ def test_slack_unchanged_in_core_mode(monkeypatch):
     monkeypatch.delenv("PRODUCT_DB", raising=False)
     from api.main import _slack_tenant
     assert _slack_tenant({"text": "x"}) == (None, None)
+
+
+# ---- Stripe customer / subscription lifecycle ----
+
+import hashlib as _hl
+import hmac as _hm
+import json as _json
+import time as _t
+
+from product import subscriptions
+
+WH = "whsec_test"
+
+
+class _R:
+    def __init__(self, body, code=200):
+        self._b, self.status_code = body, code
+
+    def json(self):
+        return self._b
+
+
+def _sign(body: bytes, ts=None, secret=WH):
+    ts = str(int(ts or _t.time()))
+    return f"t={ts},v1=" + _hm.new(secret.encode(), ts.encode() + b"." + body, _hl.sha256).hexdigest()
+
+
+def _hook(c, event, sig=None):
+    body = _json.dumps(event).encode()
+    return c.post("/stripe/webhook", content=body, headers={"stripe-signature": sig or _sign(body)})
+
+
+def _sub(tid, cust, status="active", price="price_pro", sid="sub_1", **extra):
+    return {"id": f"evt_{_t.time_ns()}", "type": extra.pop("type", "customer.subscription.updated"),
+            "data": {"object": {"id": sid, "customer": cust, "status": status, "metadata": {"tenant_id": tid},
+                                "items": {"data": [{"price": {"id": price}}]}, **extra}}}
+
+
+@pytest.fixture
+def stripe_env(env):
+    c, mp = env
+    mp.setenv("STRIPE_SECRET_KEY", "sk_test")
+    mp.setenv("STRIPE_WEBHOOK_SECRET", WH)
+    mp.setenv("STRIPE_PRICE_STARTER", "price_starter")
+    mp.setenv("STRIPE_PRICE_PRO", "price_pro,price_use:metered")
+    mp.setenv("STRIPE_SUCCESS_URL", "https://x/ok")
+    mp.setenv("STRIPE_CANCEL_URL", "https://x/no")
+    calls = []
+
+    def fake(url, data, headers):
+        calls.append((url, data, headers))
+        if url.endswith("/customers"):
+            return _R({"id": "cus_1"})
+        return _R({"url": "https://stripe/checkout"})
+
+    return c, mp, calls, fake
+
+
+def test_tenant_creation_makes_stripe_customer(stripe_env, monkeypatch):
+    c, mp, calls, fake = stripe_env
+    monkeypatch.setattr(subscriptions.httpx, "post", lambda url, data, headers, auth, timeout: fake(url, data, headers))
+    t = _tenant(c)
+    assert t["stripe_customer_id"] == "cus_1"
+    assert calls[0][1]["metadata[tenant_id]"] == t["id"] and calls[0][2]["Idempotency-Key"]
+
+
+def test_checkout_creates_session_with_tenant_metadata(stripe_env, monkeypatch):
+    c, mp, calls, fake = stripe_env
+    monkeypatch.setattr(subscriptions.httpx, "post", lambda url, data, headers, auth, timeout: fake(url, data, headers))
+    t = _tenant(c)
+    r = c.post("/billing/checkout", json={"plan": "pro"}, headers={"x-api-key": t["api_key"]})
+    assert r.json() == {"url": "https://stripe/checkout"}
+    d = calls[-1][1]
+    assert d["customer"] == "cus_1" and d["client_reference_id"] == t["id"] and d["mode"] == "subscription"
+    assert d["line_items[0][quantity]"] == "1" and "line_items[1][quantity]" not in d  # metered price: no quantity
+    assert d["subscription_data[metadata][plan]"] == "pro"
+    # unpurchasable / unknown plan, missing key
+    assert c.post("/billing/checkout", json={"plan": "enterprise"}, headers={"x-api-key": t["api_key"]}).status_code == 422
+    assert c.post("/billing/checkout", json={}, headers={"x-api-key": t["api_key"]}).status_code == 422
+    assert c.post("/billing/checkout", json={"plan": "pro"}).status_code == 401
+
+
+def test_checkout_refused_when_already_subscribed(stripe_env, monkeypatch):
+    c, mp, calls, fake = stripe_env
+    monkeypatch.setattr(subscriptions.httpx, "post", lambda url, data, headers, auth, timeout: fake(url, data, headers))
+    t = _tenant(c)
+    assert _hook(c, _sub(t["id"], "cus_1")).status_code == 200
+    assert c.post("/billing/checkout", json={"plan": "starter"}, headers={"x-api-key": t["api_key"]}).status_code == 409
+
+
+def test_webhook_rejects_bad_or_stale_signature_and_unconfigured(stripe_env):
+    c, mp, *_ = stripe_env
+    ev = _sub("ten_x", "cus_1")
+    assert _hook(c, ev, sig="t=1,v1=bad").status_code == 400
+    body = _json.dumps(ev).encode()
+    assert _hook(c, ev, sig=_sign(body, ts=_t.time() - 4000)).status_code == 400
+    assert c.post("/stripe/webhook", content=body).status_code == 400
+    mp.delenv("STRIPE_WEBHOOK_SECRET")
+    assert _hook(c, ev).status_code == 503
+
+
+def test_webhook_hidden_in_core_mode(monkeypatch):
+    monkeypatch.delenv("PRODUCT_DB", raising=False)
+    assert TestClient(app).post("/stripe/webhook", content=b"{}").status_code == 404
+
+
+def test_subscription_upgrades_then_cancellation_downgrades(stripe_env):
+    c, mp, *_ = stripe_env
+    t = _tenant(c)
+    store.update_tenant(t["id"], stripe_customer_id="cus_1")
+    assert _hook(c, _sub(t["id"], "cus_1")).status_code == 200
+    got = store.get_tenant(t["id"])
+    assert (got["plan"], got["stripe_subscription_id"], got["subscription_status"]) == ("pro", "sub_1", "active")
+    # plan change in the portal: price swaps to starter
+    _hook(c, _sub(t["id"], "cus_1", price="price_starter"))
+    assert store.get_tenant(t["id"])["plan"] == "starter"
+    # cancellation
+    r = _hook(c, {"id": "evt_del", "type": "customer.subscription.deleted",
+                  "data": {"object": {"id": "sub_1", "customer": "cus_1", "status": "canceled"}}})
+    assert r.status_code == 200
+    got = store.get_tenant(t["id"])
+    assert (got["plan"], got["active"], got["stripe_subscription_id"], got["subscription_status"]) == ("free", 1, None, "canceled")
+
+
+def test_failed_payment_keeps_plan_while_retrying_then_downgrades(stripe_env):
+    c, mp, *_ = stripe_env
+    t = _tenant(c)
+    store.update_tenant(t["id"], stripe_customer_id="cus_1")
+    _hook(c, _sub(t["id"], "cus_1"))
+    inv = lambda nxt, i: {"id": f"evt_inv{i}", "type": "invoice.payment_failed",
+                          "data": {"object": {"customer": "cus_1", "subscription": "sub_1", "next_payment_attempt": nxt}}}
+    _hook(c, inv(1900000000, 1))
+    got = store.get_tenant(t["id"])
+    assert (got["plan"], got["subscription_status"]) == ("pro", "past_due")
+    _hook(c, inv(None, 2))  # retries exhausted
+    got = store.get_tenant(t["id"])
+    assert (got["plan"], got["subscription_status"]) == ("free", "unpaid")
+    # a subscription.updated with status unpaid/canceled also downgrades
+    _hook(c, _sub(t["id"], "cus_1"))
+    assert store.get_tenant(t["id"])["plan"] == "pro"
+    _hook(c, _sub(t["id"], "cus_1", status="unpaid"))
+    assert store.get_tenant(t["id"])["plan"] == "free"
+
+
+def test_webhook_is_idempotent_and_stale_old_subscription_cannot_downgrade(stripe_env):
+    c, mp, *_ = stripe_env
+    t = _tenant(c)
+    store.update_tenant(t["id"], stripe_customer_id="cus_1")
+    ev = _sub(t["id"], "cus_1")
+    assert _hook(c, ev).json()["result"] == "handled"
+    store.update_tenant(t["id"], plan="starter")  # manual change between deliveries
+    assert _hook(c, ev).json()["result"] == "duplicate"
+    assert store.get_tenant(t["id"])["plan"] == "starter"  # replay did not re-apply
+    # old subscription cancelled after the tenant moved to sub_2
+    _hook(c, _sub(t["id"], "cus_1", sid="sub_2", price="price_starter"))
+    _hook(c, {"id": "evt_old", "type": "customer.subscription.deleted",
+              "data": {"object": {"id": "sub_1", "customer": "cus_1", "status": "canceled"}}})
+    got = store.get_tenant(t["id"])
+    assert (got["plan"], got["stripe_subscription_id"]) == ("starter", "sub_2")
+
+
+def test_checkout_completed_links_subscription(stripe_env, monkeypatch):
+    c, mp, *_ = stripe_env
+    t = _tenant(c)
+    monkeypatch.setattr(subscriptions, "_fetch_subscription", lambda sid: _sub(t["id"], "cus_9", sid=sid)["data"]["object"])
+    r = _hook(c, {"id": "evt_co", "type": "checkout.session.completed",
+                  "data": {"object": {"client_reference_id": t["id"], "customer": "cus_9", "subscription": "sub_9"}}})
+    assert r.status_code == 200
+    got = store.get_tenant(t["id"])
+    assert (got["plan"], got["stripe_customer_id"], got["stripe_subscription_id"]) == ("pro", "cus_9", "sub_9")
+
+
+def test_failed_processing_is_not_recorded_so_stripe_retries(stripe_env, monkeypatch):
+    c, mp, *_ = stripe_env
+    t = _tenant(c)
+    def boom(sid):
+        raise subscriptions.StripeError("down")
+    monkeypatch.setattr(subscriptions, "_fetch_subscription", boom)
+    ev = {"id": "evt_retry", "type": "checkout.session.completed",
+          "data": {"object": {"client_reference_id": t["id"], "customer": "cus_1", "subscription": "sub_1"}}}
+    assert _hook(c, ev).status_code == 500
+    monkeypatch.setattr(subscriptions, "_fetch_subscription", lambda sid: _sub(t["id"], "cus_1")["data"]["object"])
+    assert _hook(c, ev).json()["result"] == "handled"
+
+
+def test_old_database_is_migrated(tmp_path, monkeypatch):
+    import sqlite3
+    db = tmp_path / "old.db"
+    sqlite3.connect(db).executescript("CREATE TABLE tenants (id TEXT PRIMARY KEY, name TEXT NOT NULL, plan TEXT NOT NULL "
+        "DEFAULT 'free', stripe_customer_id TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL);"
+        "INSERT INTO tenants VALUES('ten_1','a','pro','cus_1',1,0);")
+    monkeypatch.setenv("PRODUCT_DB", str(db))
+    assert store.get_tenant("ten_1")["subscription_status"] is None
