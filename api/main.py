@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 
-from agent import llm
+from agent import approvals, llm
 from agent.cost_watch import check_cost, parse_watch, watch_forever
 from agent.graph import build_graph
 
@@ -258,6 +258,103 @@ def _handle_slack(payload: dict, tenant: dict | None = None) -> None:
         _release(rid)
         logging.getLogger(__name__).exception("slack command failed")
         send_message(channel, "Command failed; see server logs.")
+
+
+# ---- human-in-the-loop fixes -> pull requests ----------------------------------------------------
+# A caller proposes one file change; nothing happens until someone holding AGENT_APPROVER_KEY approves it, and the
+# approval opens a PR (never a merge). Single-org feature: 404 in product (multi-tenant) mode, 503 until configured.
+
+def require_approver(x_approver_key: str | None = Header(None)) -> None:
+    key = os.getenv("AGENT_APPROVER_KEY")
+    if not key or key == os.getenv("AGENT_API_KEY"):  # a requester must not be able to approve its own proposal
+        raise HTTPException(status_code=503, detail="AGENT_APPROVER_KEY must be set and differ from AGENT_API_KEY")
+    if not hmac.compare_digest((x_approver_key or "").encode(), key.encode()):
+        raise HTTPException(status_code=401, detail="invalid approver key")
+
+
+def _fixes_available() -> None:
+    if product_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    if not approvals.enabled():
+        raise HTTPException(status_code=503, detail="AGENT_APPROVALS_DB is not configured")
+
+
+def _fix(fid: str) -> dict:
+    fix = approvals.get(fid)
+    if not fix:
+        raise HTTPException(status_code=404, detail="no such fix")
+    return fix
+
+
+def _label(value, default: str) -> str:
+    return " ".join(str(value or default).split())[:60] or default
+
+
+@router.post("/fixes", status_code=201, dependencies=[Depends(require_api_key), Depends(_fixes_available)])
+def propose_fix(payload: dict):
+    from agent.tools.github import GitHubToolError, _check_repo
+    from agent.tools.github_pr import MAX_CONTENT, check_path
+
+    allowed = {r.strip() for r in os.getenv("AGENT_PR_REPOS", "").split(",") if r.strip()}
+    repo = payload.get("repo")
+    if repo not in allowed:  # fail closed: empty AGENT_PR_REPOS allows nothing
+        raise HTTPException(status_code=403, detail="repo is not in AGENT_PR_REPOS")
+    base = payload.get("base") or "main"
+    title, content = payload.get("title"), payload.get("content")
+    try:
+        _check_repo(repo), check_path(payload.get("path"))
+    except GitHubToolError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if not isinstance(title, str) or not title.strip() or len(title) > 200:
+        raise HTTPException(status_code=422, detail="'title' is required (at most 200 characters)")
+    if not isinstance(content, str) or len(content) > MAX_CONTENT:
+        raise HTTPException(status_code=422, detail=f"'content' must be text of at most {MAX_CONTENT} characters")
+    if not isinstance(base, str):
+        raise HTTPException(status_code=422, detail="'base' must be a branch name")
+    fix = approvals.create(repo, base, payload["path"], content, title.strip(), str(payload.get("summary") or "")[:2000],
+                           _label(payload.get("requested_by"), "api"))
+    return {"id": fix["id"], "status": fix["status"]}
+
+
+@router.get("/fixes", dependencies=[Depends(require_api_key), Depends(_fixes_available)])
+def list_fixes():
+    return {"pending": approvals.pending()}
+
+
+@router.get("/fixes/{fid}", dependencies=[Depends(require_api_key), Depends(_fixes_available)])
+def show_fix(fid: str):
+    return _fix(fid)  # includes the full proposed content, which is what the approver reviews
+
+
+@router.post("/fixes/{fid}/reject", dependencies=[Depends(require_approver), Depends(_fixes_available)])
+def reject_fix(fid: str, x_approver: str | None = Header(None)):
+    _fix(fid)
+    if not approvals.claim(fid, "rejected", _label(x_approver, "approver")):
+        raise HTTPException(status_code=409, detail="fix is not pending")
+    return {"id": fid, "status": "rejected"}
+
+
+@router.post("/fixes/{fid}/approve", dependencies=[Depends(require_approver), Depends(_fixes_available)])
+def approve_fix(fid: str, x_approver: str | None = Header(None)):
+    from agent.tools.github import GitHubToolError
+    from agent.tools.github_pr import open_fix_pr
+
+    fix = _fix(fid)
+    allowed = {r.strip() for r in os.getenv("AGENT_PR_REPOS", "").split(",") if r.strip()}
+    if fix["repo"] not in allowed:  # the allowlist may have shrunk since the proposal was made
+        raise HTTPException(status_code=403, detail="repo is not in AGENT_PR_REPOS")
+    who = _label(x_approver, "approver")
+    if not approvals.claim(fid, "approving", who):  # atomic: two approvals cannot both open a PR
+        raise HTTPException(status_code=409, detail="fix is not pending")
+    try:
+        pr = open_fix_pr(fix["repo"], fix["base"], f"agent-fix/{fid}", fix["path"], fix["content"], fix["title"],
+                         f"{fix['summary']}\n\n---\nProposed by {fix['requested_by']}, approved by {who}. "
+                         "Opened by the DevOps AI Agent after human approval; review before merging.")
+    except GitHubToolError as e:
+        approvals.finish(fid, "failed", error=str(e))
+        raise HTTPException(status_code=502, detail=str(e))
+    approvals.finish(fid, "opened", pr_url=pr["url"])
+    return {"id": fid, "status": "opened", "pr_url": pr["url"]}
 
 
 @router.post("/slack/command")

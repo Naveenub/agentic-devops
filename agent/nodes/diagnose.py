@@ -4,9 +4,10 @@ from typing import List, Optional
 
 from agent import llm
 from agent.memory.retrieval import Hit, retrieve
-from agent.signatures import COST_ANOMALY, CORROBORATING, DIAGNOSIS, TERRAFORM_CATEGORY, UNKNOWN, classify
+from agent.signatures import (COST_ANOMALY, CORROBORATING, DIAGNOSIS, TERRAFORM_CATEGORY, TERRAFORM_DRIFT, UNKNOWN,
+                              classify)
 from agent.state import LLM_CATEGORY, AgentState, real_observations
-from agent.tools.terraform import parse_error
+from agent.tools.terraform import parse_drift, parse_error
 
 # Read-only policy: the LLM may not suggest mutating commands.
 _DENY = re.compile(
@@ -43,6 +44,15 @@ def _terraform(obs: List[dict]) -> Optional[dict]:
     for o in obs:
         parsed = parse_error(o["content"])
         if parsed and parsed["kind"] in TERRAFORM_CATEGORY and parsed["line"]:
+            return {**parsed, "source": o["source"]}
+    return None
+
+
+def _drift(obs: List[dict]) -> Optional[dict]:
+    """First `terraform plan` drift section in a real observation, with its source."""
+    for o in obs:
+        parsed = parse_drift(o["content"])
+        if parsed:
             return {**parsed, "source": o["source"]}
     return None
 
@@ -102,6 +112,12 @@ def diagnose(state: AgentState) -> dict:
         tf = None
     if tf and tf["kind"] == "iam_denied" and tf["action"]:
         diagnosis += f' Denied action: {tf["action"]}' + (f' on {tf["resource"]}.' if tf["resource"] else ".")
+
+    # Drift: only when nothing else matched, so a real failure in the same log keeps its category.
+    drift = _drift(obs) if category == UNKNOWN else None
+    if drift:
+        category, diagnosis, tf = TERRAFORM_DRIFT, drift["summary"], drift
+        evidence.append(f'{drift["source"]}: {drift["line"]}')
 
     # Cost z-score verdict (deterministic). A spike names the category; a clean verdict only
     # replaces the misleading "no failure signature" text. No verdict (None) is ignored.

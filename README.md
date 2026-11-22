@@ -502,16 +502,33 @@ Perfect as a **portfolio flagship** for:
 
 ---
 
+## 🧑‍⚖️ Fix proposals: human approval, then a pull request
+
+The agent never writes to GitHub on its own. A caller proposes one file change, a human with a *different* key approves it, and only then is a pull request opened. Nothing is ever merged, and the base branch is never pushed to.
+
+| Call | Key | What it does |
+|---|---|---|
+| `POST /fixes {"repo","path","content","title","summary","base"?}` | `X-API-Key` | Stores a **pending** proposal (201). |
+| `GET /fixes`, `GET /fixes/{id}` | `X-API-Key` | Pending list; one proposal with its full `content`, which is what the approver reviews. |
+| `POST /fixes/{id}/approve` | `X-Approver-Key` | Opens branch `agent-fix/<id>`, commits the file, opens the PR. Once only (a second approve is 409). |
+| `POST /fixes/{id}/reject` | `X-Approver-Key` | Final. |
+
+Set `AGENT_APPROVALS_DB` (SQLite file), `AGENT_APPROVER_KEY` (must differ from `AGENT_API_KEY`, else 503), `AGENT_PR_REPOS` (comma-separated `owner/name` allowlist; empty allows nothing, checked again at approval) and `GITHUB_PR_TOKEN` (a separate fine-grained token: Contents + Pull requests write on those repos only; the read-only `GITHUB_TOKEN` is untouched). Paths under `.git/` or `.github/` and anything with `..` are refused, so a proposal cannot edit workflows. `X-Approver: <name>` is recorded as the approver label; the key itself is shared, so it is a label, not an identity. The change comes from the proposal: the agent does not generate code diffs. Single-org only (404 in product mode).
+
+**Terraform drift:** a `terraform plan` log containing the "Objects have changed outside of Terraform" section is diagnosed as `terraform_drift`, listing the changed/deleted resources with the header line as evidence. A real error in the same log keeps its own category. Suggestions are read-only (`terraform plan -refresh-only`, find who changed it, then update code or revert through the pipeline).
+
+---
+
 ## 🛣️ Roadmap
 
 * [x] Terraform failure parsing (IAM denial, expired credentials, state lock)
 * [x] Slack slash-command interface (`/slack/command`)
 * [x] Evaluation & hallucination metrics
 * [x] Multi-tenant product layer (open-core split)
-* [ ] Terraform drift analysis
-* [ ] Auto PR creation for fixes
+* [x] Terraform drift analysis (`terraform plan` output, category `terraform_drift`)
+* [x] PR creation for fixes, only after human approval (`/fixes`; one file per PR, never merges)
 * [ ] Multi-agent (Observer / Diagnoser / Executor)
-* [ ] Human-in-the-loop validation
+* [x] Human-in-the-loop approval before any write to GitHub
 
 ---
 

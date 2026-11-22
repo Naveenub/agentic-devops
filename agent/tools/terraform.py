@@ -43,3 +43,32 @@ def parse_error(log: str) -> dict | None:
 
     return {"kind": kind, "summary": summary, "action": action, "resource": resource,
             "message": message, "line": line}
+
+
+_DRIFT_HEADER = re.compile(r"^.*Objects have changed outside of Terraform.*$", re.M)
+_DRIFT_END = re.compile(r"Unless you have made equivalent changes|Terraform will perform the following actions"
+                        r"|No changes\. Your infrastructure matches", re.I)
+_DRIFT_ITEM = re.compile(r"^\s*(?:│\s*)?#\s+(\S+)\s+(has changed|has been deleted)\s*$", re.M)
+
+
+def parse_drift(log: str) -> dict | None:
+    """Detect drift in `terraform plan` output: the 'Objects have changed outside of Terraform' section.
+    Returns {"kind": "drift", "resources": [{"address", "change": "changed"|"deleted"}], "summary", "line"} or None.
+    `line` is the verbatim header line (usable as evidence). Read-only text parsing; a plan with no such
+    section, or a section naming no resource, is not drift."""
+    m = _DRIFT_HEADER.search(log or "")
+    if not m:
+        return None
+    rest = log[m.end():]
+    end = _DRIFT_END.search(rest)
+    section = rest[:end.start()] if end else rest
+    seen, resources = set(), []
+    for addr, what in _DRIFT_ITEM.findall(section):
+        if addr not in seen:
+            seen.add(addr)
+            resources.append({"address": addr, "change": "deleted" if "deleted" in what else "changed"})
+    if not resources:
+        return None
+    names = ", ".join(f"{r['address']} ({r['change']})" for r in resources[:5]) + (", ..." if len(resources) > 5 else "")
+    return {"kind": "drift", "resources": resources, "line": m.group(0).strip(),
+            "summary": f"Terraform detected drift: {len(resources)} resource(s) changed outside Terraform: {names}."}

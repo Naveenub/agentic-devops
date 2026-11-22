@@ -17,7 +17,7 @@ from typing import Dict, List, Tuple
 from agent.signatures import SIGNATURES, UNKNOWN
 from agent.state import LLM_CATEGORY
 
-VALID_CATEGORIES = tuple(n for n, _ in SIGNATURES) + ("state_lock", LLM_CATEGORY, UNKNOWN)
+VALID_CATEGORIES = tuple(n for n, _ in SIGNATURES) + ("state_lock", "terraform_drift", LLM_CATEGORY, UNKNOWN)
 
 # Ordered: specific secrets first so the generic patterns do not half-redact them.
 _RULES: List[Tuple[str, re.Pattern, str]] = [

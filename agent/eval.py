@@ -31,7 +31,7 @@ from agent.state import LLM_CATEGORY
 
 EVAL_DIR = Path(__file__).resolve().parents[1] / "data" / "eval"
 REQUIRED = ("id", "query", "expected_category")
-VALID_CATEGORIES = {n for n, _ in SIGNATURES} | {"state_lock", LLM_CATEGORY, UNKNOWN}
+VALID_CATEGORIES = {n for n, _ in SIGNATURES} | {"state_lock", "terraform_drift", LLM_CATEGORY, UNKNOWN}
 LIVE_CONF_CAP = 0.4  # an LLM-only verdict never exceeds this (agent.confidence)
 
 

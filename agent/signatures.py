@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 
 UNKNOWN = "unknown"
 COST_ANOMALY = "cost_anomaly"  # set by diagnose from the z-score verdict, not by a regex
+TERRAFORM_DRIFT = "terraform_drift"  # set by diagnose from agent.tools.terraform.parse_drift, not by a regex
 
 # Ordered: first match wins.
 SIGNATURES = [
@@ -19,6 +20,7 @@ DIAGNOSIS = {
     "credentials_expired": "Credentials/security token used by the pipeline have expired.",
     "image_pull": "Pod cannot pull its image (bad tag or missing registry permissions).",
     "state_lock": "Terraform state is locked by another run (or a stale lock).",
+    TERRAFORM_DRIFT: "Terraform state differs from the real infrastructure: resources were changed outside Terraform.",
     UNKNOWN: "Insufficient evidence: no recognised failure signature in the observations.",
 }
 
@@ -44,6 +46,11 @@ SUGGESTIONS = {
     "state_lock": [
         "Read the Lock Info (ID, Who, Created) in the error to find the run holding the lock.",
         "Wait for that run to finish; if it is dead, a human decides whether to release the stale lock.",
+    ],
+    TERRAFORM_DRIFT: [
+        "Review each drifted resource: terraform plan -refresh-only shows the out-of-band change without applying it.",
+        "Find who or what changed it (CloudTrail / audit log) before deciding which side is correct.",
+        "Then either update the Terraform code to match the change, or revert the resource through the normal pipeline.",
     ],
     COST_ANOMALY: [
         "Break the spike down by usage type and linked account in Cost Explorer to find the driver.",
