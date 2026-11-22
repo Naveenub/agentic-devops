@@ -1,6 +1,11 @@
 name: DevOps Agent Tests and Report
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"   # weekly: live-model accuracy drifts when the provider changes the model
 
 jobs:
   test:
@@ -23,6 +28,29 @@ jobs:
 
       - name: Report is current (synthetic dataset)
         run: make report-check
+
+  live-eval:
+    # Live model over golden + real cases, plus the per-claim entailment judge. Needs the OPENAI_API_KEY
+    # repo secret; skipped on forks/PRs where secrets are unavailable. Offline `test` job does not cover this.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Require the secret (a skipped live eval must not look like a pass)
+        run: test -n "$OPENAI_API_KEY" || { echo "OPENAI_API_KEY secret not set"; exit 1; }
+
+      - name: Live eval + groundedness judge
+        run: make live-eval
 
   test-postgres:
     runs-on: ubuntu-latest
