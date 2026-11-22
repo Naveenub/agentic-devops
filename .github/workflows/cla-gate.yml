@@ -1,0 +1,34 @@
+name: CLA gate for product/
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    steps:
+      # Checks out the BASE branch (never PR code): the signatory list comes from trusted code.
+      - uses: actions/checkout@v4
+      - name: Require a signed CLA for changes to product/
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          files=$(gh api --paginate "repos/${{ github.repository }}/pulls/${PR}/files" --jq '.[].filename')
+          if ! echo "$files" | grep -Eq '^(product/|tests/test_product\.py$|Dockerfile\.product$)'; then
+            echo "No commercial-layer files touched; CLA not required."; exit 0
+          fi
+          if [ "$AUTHOR" = "$OWNER" ]; then echo "Owner is exempt."; exit 0; fi
+          if grep -Eiq "^\s*${AUTHOR}\s*\|" .github/CLA-SIGNATORIES.txt; then
+            echo "CLA on file for ${AUTHOR}."; exit 0
+          fi
+          echo "::error::This PR changes product/ and ${AUTHOR} has not signed the CLA. See CLA.md."
+          exit 1

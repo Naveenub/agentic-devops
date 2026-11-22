@@ -1,0 +1,2 @@
+# One signatory per line: <github-login> | <full legal name> | <YYYY-MM-DD> | CLA v0.1 [| on behalf of <company>]
+# Lines starting with # are ignored. The repository owner is exempt (owns the copyright).
