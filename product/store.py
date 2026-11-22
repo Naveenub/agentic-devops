@@ -208,10 +208,35 @@ def tenant_for_key(key: str) -> dict | None:
     return dict(r) if r else None
 
 
+class QuotaRefused(Exception):
+    pass
+
+
 def record(tid: str, event: str, quantity: int = 1) -> None:
     if quantity > 0:
         with conn() as c:
             c.execute("INSERT INTO usage(tenant_id,event,quantity,ts) VALUES(?,?,?,?)", (tid, event, quantity, time.time()))
+
+
+def reserve(tid: str, event: str, quantity: int, check) -> int:
+    """Atomic check-and-record: under the write lock, `check(used_this_month)` returns a refusal reason or None;
+    if None the usage row is inserted in the same transaction and its id returned (pass it to `release` if the
+    work fails). Raises QuotaRefused(reason) otherwise. Concurrent requests can no longer overshoot a limit."""
+    with conn(immediate=True) as c:
+        now = time.time()
+        rows = c.execute("SELECT event, SUM(quantity) q FROM usage WHERE tenant_id=? AND ts>=? GROUP BY event",
+                         (tid, month_start(now))).fetchall()
+        reason = check({r["event"]: r["q"] for r in rows})
+        if reason:
+            raise QuotaRefused(reason)
+        return c.execute("INSERT INTO usage(tenant_id,event,quantity,ts) VALUES(?,?,?,?)",
+                         (tid, event, quantity, now)).lastrowid
+
+
+def release(row_id: int) -> None:
+    """Undo a reservation whose work failed. Rows already reported to Stripe are left alone."""
+    with conn() as c:
+        c.execute("DELETE FROM usage WHERE id=? AND reported=0", (row_id,))
 
 
 def usage_since(tid: str, since: float) -> dict:

@@ -840,3 +840,77 @@ def test_mail_failure_never_breaks_or_leaks_through_the_recovery_request(mail_en
         r = c.post("/recover", json={"email": "m@example.com"})
     assert r.status_code == 202  # the caller cannot tell a mail failure from success (and could not before either)
     assert "OSError" in caplog.text and "recover#t=" not in caplog.text and "smtp down" not in caplog.text
+
+
+def test_llm_token_quota_is_enforced_on_hard_limit_plans(env):
+    c, mp = env
+    mp.setenv("PRODUCT_PLANS", '{"free": {"monthly_quota": {"analyze": 50, "llm_tokens": 100}}}')
+    t = _tenant(c)
+    assert _ask(c, t["api_key"]).status_code == 200
+    store.record(t["id"], "llm_tokens", 100)
+    r = _ask(c, t["api_key"])
+    assert r.status_code == 429 and "llm_tokens" in r.json()["detail"]
+
+
+def test_paid_plan_spend_cap(env):
+    c, mp = env
+    mp.setenv("PRODUCT_PLANS", '{"starter": {"monthly_quota": {"analyze": 1}, "spend_cap_cents": 10}}')
+    s = _tenant(c, "starter", "s")  # overage 5 cents/run: runs 2 and 3 reach the cap, run 4 would pass it
+    codes = [_ask(c, s["api_key"]) for _ in range(4)]
+    assert [r.status_code for r in codes] == [200, 200, 200, 429] and "spend cap" in codes[3].json()["detail"]
+
+
+def test_quota_check_and_write_are_atomic(env):
+    import threading
+    from fastapi import HTTPException
+    from product import metering
+    c, mp = env
+    mp.setenv("PRODUCT_PLANS", '{"free": {"monthly_quota": {"analyze": 5}}}')
+    t = _tenant(c)
+    ok, refused = [], []
+
+    def go():
+        try:
+            ok.append(metering.reserve(t, "analyze"))
+        except HTTPException:
+            refused.append(1)
+
+    threads = [threading.Thread(target=go) for _ in range(20)]
+    [x.start() for x in threads]
+    [x.join() for x in threads]
+    assert len(ok) == 5 and len(refused) == 15
+    assert store.usage_since(t["id"], store.month_start())["analyze"] == 5
+
+
+def test_failed_run_releases_its_reservation(env):
+    c, mp = env
+    import api.main as m
+    mp.setattr(m, "_run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    t = _tenant(c)
+    try:
+        _ask(c, t["api_key"])
+    except RuntimeError:
+        pass
+    assert store.usage_since(t["id"], store.month_start()).get("analyze", 0) == 0
+
+
+def test_stripe_report_stamps_usage_into_its_own_month(env):
+    import calendar
+    import time as _t
+    c, mp = env
+    t = _tenant(c)
+    mp.setenv("STRIPE_SECRET_KEY", "sk_test_x")
+    mp.setenv("STRIPE_METER_ANALYZE", "agent_analyze_runs")
+    c.patch(f"/admin/tenants/{t['id']}", json={"stripe_customer_id": "cus_1"}, headers={"x-admin-key": "adm"})
+    jan, feb = calendar.timegm((2026, 1, 31, 23, 59, 0)), calendar.timegm((2026, 2, 1, 0, 1, 0))
+    with store.conn() as db:
+        for ts in (jan, feb):
+            db.execute("INSERT INTO usage(tenant_id,event,quantity,ts) VALUES(?,?,?,?)", (t["id"], "analyze", 1, ts))
+    calls = []
+
+    class R:
+        status_code = 200
+
+    assert billing.report_usage(post=lambda d: (calls.append(d), R())[1]) == {"reported": 2, "failed": 0}
+    assert sorted(int(d["timestamp"]) for d in calls) == [jan, feb]
+    assert billing.report_usage(post=lambda d: R())["reported"] == 0

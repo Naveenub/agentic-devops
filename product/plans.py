@@ -5,6 +5,8 @@ GET /admin/billing/drift), so a plan is never defined in two places. Quotas are 
 `hard_limit` plans; on the others, usage past the quota is billed at `overage`.
 
   base_cents   flat monthly price in the currency's minor unit; None = not sold online (e.g. enterprise)
+  spend_cap_cents  paid plans: max overage charge per calendar month (minor units); usage that would pass it is
+               refused with HTTP 429. None = no cap.
   overage      event -> price per unit past the included quota, in minor units (decimal string, e.g. "0.0002"
                cents per LLM token = $2 per 1M tokens). Events without a rate are not billed.
 
@@ -44,6 +46,12 @@ class Plan:
     base_cents: int | None = None  # flat monthly price (minor units); 0 = free; None = not sold online
     currency: str = "usd"
     overage: dict = field(default_factory=dict)  # event -> minor units per unit past the quota (decimal string)
+    spend_cap_cents: int | None = None  # max monthly overage charge (minor units); None = uncapped
+
+    def overage_cents(self, used: dict) -> Decimal:
+        """Overage charge, in minor units, for this month's usage (event -> units)."""
+        return sum((max(0, used.get(e, 0) - inc) * rate for e, (inc, rate) in self.billed_events().items()),
+                   Decimal(0))
 
     @property
     def price_label(self) -> str:
@@ -59,14 +67,14 @@ class Plan:
                 if e in EVENTS and self.monthly_quota.get(e) is not None and not self.hard_limit}
 
 
-# PLACEHOLDER PRICES: set the real ones here, then run `make stripe-sync`.
+# PLACEHOLDER PRICES AND SPEND CAPS: set the real ones here, then run `make stripe-sync`.
 PLANS = {
     "free": Plan("free", {"analyze": 50, "cost_check": 0, "llm_tokens": 100_000}, 10, hard_limit=True, base_cents=0),
     "starter": Plan("starter", {"analyze": 1_000, "cost_check": 100, "llm_tokens": 2_000_000}, 60, cost_checks=True,
-                    base_cents=4900,
+                    base_cents=4900, spend_cap_cents=10_000,
                     overage={"analyze": "5", "cost_check": "5", "llm_tokens": "0.0002"}),
     "pro": Plan("pro", {"analyze": 10_000, "cost_check": 1_000, "llm_tokens": 20_000_000}, 300, cost_checks=True,
-                base_cents=9900,
+                base_cents=9900, spend_cap_cents=50_000,
                 overage={"analyze": "3", "cost_check": "3", "llm_tokens": "0.00015"}),
     "enterprise": Plan("enterprise", {"analyze": None, "cost_check": None, "llm_tokens": None}, 1_000,
                        cost_checks=True),
@@ -87,6 +95,7 @@ def _load() -> dict:
                               cost_checks=cfg.get("cost_checks", base.cost_checks),
                               hard_limit=cfg.get("hard_limit", base.hard_limit),
                               base_cents=cfg.get("base_cents", base.base_cents),
+                              spend_cap_cents=cfg.get("spend_cap_cents", base.spend_cap_cents),
                               currency=str(cfg.get("currency", base.currency)),
                               overage={**base.overage, **{k: str(v) for k, v in cfg.get("overage", {}).items()}})
     return plans

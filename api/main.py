@@ -63,6 +63,22 @@ def _auth(event: str):
     return dep
 
 
+def _reserve(tenant: dict | None, event: str) -> int | None:
+    """Atomic quota/spend-cap check + usage write (429 if refused). The row id goes to _release on failure."""
+    if tenant is None:
+        return None
+    from product.metering import reserve
+
+    return reserve(tenant, event)
+
+
+def _release(row_id: int | None) -> None:
+    if row_id is not None:
+        from product.metering import release
+
+        release(row_id)
+
+
 def _run(question: str, extra: dict | None = None) -> dict:
     state = {"question": question}
     state.update({k: v for k, v in (extra or {}).items() if k in ("kubernetes", "github", "cost")})
@@ -105,15 +121,18 @@ def analyze(payload: dict, tenant: dict | None = Depends(_auth("analyze"))):
         raise HTTPException(status_code=422, detail="'question' is required")
     _gate_shared_tools(tenant, payload)
     tokens: list = []
+    rid = _reserve(tenant, "analyze")
     reset = llm.usage_sink.set(tokens)
     try:
         result = _run(question, payload)
+    except BaseException:
+        _release(rid)
+        raise
     finally:
         llm.usage_sink.reset(reset)
     if tenant:
         from product.metering import record
 
-        record(tenant, "analyze")
         record(tenant, "llm_tokens", sum(tokens))
     return {
         "answer": result["answer"],
@@ -137,12 +156,12 @@ def cost_check(payload: dict, tenant: dict | None = Depends(_auth("cost_check"))
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="'threshold' must be a number")
     _gate_cost_check(tenant)  # reads the operator's AWS account and posts to the operator's Slack/PagerDuty
-    result = check_cost(service, region, threshold)
-    if tenant:
-        from product.metering import record
-
-        record(tenant, "cost_check")
-    return result
+    rid = _reserve(tenant, "cost_check")
+    try:
+        return check_cost(service, region, threshold)
+    except BaseException:
+        _release(rid)
+        raise
 
 
 def _verify_slack(raw: bytes, ts: str | None, sig: str | None) -> None:
@@ -192,22 +211,21 @@ def _handle_slack(payload: dict, tenant: dict | None = None) -> None:
     from agent.tools.slack import send_message  # lazy: slack_sdk only needed here
 
     channel = payload["channel_id"]
+    rid = None
     try:
         tokens = payload["text"].split()
         if tokens and tokens[0].lower() == "cost":  # `cost <service> <region>`, e.g. `cost ec2 us-east-1`
             if len(tokens) < 3:
                 send_message(channel, "Usage: `cost <service> <region>` e.g. `cost ec2 us-east-1`")
             else:
+                rid = _reserve(tenant, "cost_check")
                 r = check_cost(" ".join(tokens[1:-1]), tokens[-1], notify=False)
                 a = r["cost_anomaly"]
                 send_message(channel, f"*Cost:* {a['message']}"
                              + (f"\n*Suggested:* {r['suggestions'][0]}" if a["anomaly"] else ""))
-                if tenant:
-                    from product.metering import record
-
-                    record(tenant, "cost_check")
             return
         used: list = []
+        rid = _reserve(tenant, "analyze")
         reset = llm.usage_sink.set(used)
         try:
             result = _run(payload["text"])
@@ -222,9 +240,11 @@ def _handle_slack(payload: dict, tenant: dict | None = None) -> None:
         if tenant:
             from product.metering import record
 
-            record(tenant, "analyze")
             record(tenant, "llm_tokens", sum(used))
+    except HTTPException as e:  # refused by quota / spend cap at reservation time
+        send_message(channel, str(e.detail))
     except Exception:  # the ack already went out, so tell the channel instead of failing silently
+        _release(rid)
         logging.getLogger(__name__).exception("slack command failed")
         send_message(channel, "Command failed; see server logs.")
 

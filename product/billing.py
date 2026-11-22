@@ -15,7 +15,9 @@ URL = "https://api.stripe.com/v1/billing/meter_events"
 
 
 def report_usage(post=None) -> dict:
-    """Send unreported usage rows to Stripe, one aggregated event per tenant+event. Returns counts."""
+    """Send unreported usage rows to Stripe, one aggregated event per tenant+event+UTC month, stamped with the
+    time of the latest row, so a late run bills each row into the month it happened in. Returns counts.
+    (Stripe rejects timestamps older than 35 days; such a batch stays unreported and counts as failed.)"""
     key = os.getenv("STRIPE_SECRET_KEY")
     if not key:
         return {"reported": 0, "skipped": "STRIPE_SECRET_KEY is not configured"}
@@ -23,21 +25,24 @@ def report_usage(post=None) -> dict:
     sent = failed = 0
     with store.conn() as c:
         groups = c.execute(
-            "SELECT u.tenant_id, u.event, SUM(u.quantity) q, MAX(u.id) last_id, t.stripe_customer_id cust "
-            "FROM usage u JOIN tenants t ON t.id=u.tenant_id WHERE u.reported=0 GROUP BY u.tenant_id,u.event").fetchall()
+            "SELECT u.tenant_id, u.event, strftime('%Y-%m', u.ts, 'unixepoch') ym, SUM(u.quantity) q, MAX(u.id) last_id, "
+            "MAX(u.ts) last_ts, t.stripe_customer_id cust "
+            "FROM usage u JOIN tenants t ON t.id=u.tenant_id WHERE u.reported=0 "
+            "GROUP BY u.tenant_id,u.event,ym").fetchall()
         for g in groups:
             meter = os.getenv(f"STRIPE_METER_{g['event'].upper()}")
             if not (g["cust"] and meter and g["event"] in EVENTS):
                 continue  # not billable yet (no customer / no meter): stays unreported
             try:
                 r = post({"event_name": meter, "payload[stripe_customer_id]": g["cust"],
-                          "payload[value]": str(g["q"]), "identifier": f"{g['tenant_id']}-{g['event']}-{g['last_id']}"})
+                          "payload[value]": str(g["q"]), "timestamp": str(int(g["last_ts"])),
+                          "identifier": f"{g['tenant_id']}-{g['event']}-{g['last_id']}"})
                 ok = r.status_code < 300
             except httpx.HTTPError:
                 ok = False
             if ok:
-                c.execute("UPDATE usage SET reported=1 WHERE tenant_id=? AND event=? AND id<=? AND reported=0",
-                          (g["tenant_id"], g["event"], g["last_id"]))
+                c.execute("UPDATE usage SET reported=1 WHERE tenant_id=? AND event=? AND id<=? AND reported=0 "
+                          "AND strftime('%Y-%m', ts, 'unixepoch')=?", (g["tenant_id"], g["event"], g["last_id"], g["ym"]))
                 sent += 1
             else:
                 failed += 1
