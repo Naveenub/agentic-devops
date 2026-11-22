@@ -74,10 +74,31 @@ TERRAFORM_CATEGORY = {
 }
 
 
+# Log lines that address the classifier instead of describing a failure (prompt injection). Never evidence.
+_INSTRUCTION = re.compile(
+    r"^\W*(system|assistant|human|user)\s*:|ignore (all |any |the )?(previous|prior|above)"
+    r"|\b(classify|categori[sz]e|label|diagnose|report)\b.{0,40}\b(this|the) (incident|issue|failure)\b"
+    r"|\bconfidence\s*(of|[:=])?\s*1(\.0+)?\b",
+    re.I,
+)
+# End-user session expiry (app login timeouts) is not a pipeline credential failure, unless the line
+# carries an unambiguous infrastructure marker.
+_END_USER_SESSION = re.compile(r"\bsession\b|\bidle\b|/login\b|logged out|sign(ed)?[- ]?in again", re.I)
+_INFRA_CREDENTIAL = re.compile(r"expiredtoken|assumerole|\bsts\b|aws|security token|oidc|kubeconfig", re.I)
+
+
+def _is_evidence(category: str, line: str) -> bool:
+    if _INSTRUCTION.search(line):
+        return False
+    if category == "credentials_expired" and _END_USER_SESSION.search(line) and not _INFRA_CREDENTIAL.search(line):
+        return False
+    return True
+
+
 def classify(text: str) -> Tuple[str, Optional[str]]:
     """Return (category, first matching line) or (UNKNOWN, None)."""
     for category, pattern in SIGNATURES:
         for line in text.splitlines():
-            if pattern.search(line):
+            if pattern.search(line) and _is_evidence(category, line):
                 return category, line.strip()
     return UNKNOWN, None
