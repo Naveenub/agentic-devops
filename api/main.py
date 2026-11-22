@@ -132,6 +132,9 @@ async def slack_command(request: Request, background: BackgroundTasks):
     # Slack posts slash commands form-encoded; JSON is accepted too.
     payload = (json.loads(raw) if "json" in request.headers.get("content-type", "")
                else {k: v[0] for k, v in parse_qs(raw.decode()).items()})
+    allowed = {c.strip() for c in os.getenv("SLACK_ALLOWED_CHANNELS", "").split(",") if c.strip()}
+    if allowed and payload.get("channel_id") not in allowed:
+        return {"response_type": "ephemeral", "text": "This command isn't enabled in this channel."}
     background.add_task(_handle_slack, payload)
     return {"ok": True}
 

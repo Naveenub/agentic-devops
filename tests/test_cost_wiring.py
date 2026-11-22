@@ -192,6 +192,15 @@ def test_slack_command_acks_then_reports_failure_to_channel(api):
     assert sent == [("C9", "Command failed; see server logs.")]
 
 
+def test_slack_command_channel_allowlist(api):
+    client, sent, mp = api
+    mp.setenv("SLACK_ALLOWED_CHANNELS", "C1, C2")
+    r = _slack_post(client, {"text": "pod exit code 137", "channel_id": "C9"})
+    assert r.json()["response_type"] == "ephemeral" and sent == []
+    _slack_post(client, {"text": "pod exit code 137", "channel_id": "C2"})
+    assert [c for c, _ in sent] == ["C2"]
+
+
 def test_docs_are_off_and_healthz_is_open(api):
     bare = TestClient(api[0].app)
     assert [bare.get(p).status_code for p in ("/docs", "/redoc", "/openapi.json")] == [404, 404, 404]
