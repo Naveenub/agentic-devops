@@ -1,15 +1,34 @@
+# VCS / CI
 .git
 .github
+
+# Secrets and local config (never bake into an image)
 .env
+.env.*
+!.env.example
+
+# Python / tooling caches
 .venv
+venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local state
 .chroma/
+*.db
+reports/
+
+# Not needed at runtime
 tests/
 docs/
-reports/
 ui/
-*.md
+/*.md
+Makefile
+pytest.ini
 Dockerfile
-docker-compose.yml
+Dockerfile.product
+docker-compose*.yml
+.DS_Store
