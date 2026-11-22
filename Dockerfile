@@ -4,6 +4,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
+# kubectl (the Kubernetes tool shells out to `kubectl logs`). Pinned + checksum-verified.
+ARG TARGETARCH
+ARG KUBECTL_VERSION=v1.31.0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
+    && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl.sha256" -o kubectl.sha256 \
+    && echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c - \
+    && install -m 0755 kubectl /usr/local/bin/kubectl \
+    && rm kubectl kubectl.sha256 \
+    && apt-get purge -y --auto-remove curl \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Install dependencies first so this layer is cached unless requirements.txt changes.

@@ -15,12 +15,18 @@ def set_client(fn: Optional[Callable[[str, str], Optional[str]]]) -> None:
     _override = fn
 
 
+def _api_key() -> str:
+    """OPENAI_API_KEY, or "" if unset or still the .env.example placeholder (sk-xxxx)."""
+    key = os.getenv("OPENAI_API_KEY", "").strip()
+    return "" if key.lower().endswith("xxxx") else key
+
+
 def enabled() -> bool:
     if _override is not None:
         return True
     if os.getenv("AGENT_LLM", "").lower() == "off":
         return False
-    return bool(os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL"))
+    return bool(_api_key() or os.getenv("OPENAI_BASE_URL"))
 
 
 def _http(system: str, user: str) -> Optional[str]:
@@ -28,8 +34,8 @@ def _http(system: str, user: str) -> Optional[str]:
 
     base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     headers = {"Content-Type": "application/json"}
-    if os.getenv("OPENAI_API_KEY"):
-        headers["Authorization"] = f"Bearer {os.environ['OPENAI_API_KEY']}"
+    if _api_key():
+        headers["Authorization"] = f"Bearer {_api_key()}"
     resp = httpx.post(
         f"{base}/chat/completions",
         headers=headers,

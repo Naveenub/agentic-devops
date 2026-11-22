@@ -76,3 +76,12 @@ def test_disabled_without_key(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     assert not llm.enabled()
     assert run_agent({"question": "q", "observations": OOM})["diagnosis_source"] == "signature"
+
+
+def test_placeholder_api_key_does_not_enable_llm(monkeypatch):
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("AGENT_LLM", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-xxxx")
+    assert not llm.enabled()
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key-123")
+    assert llm.enabled()

@@ -1,0 +1,10 @@
+# Opt-in: gives the container read-only access to your kubeconfig so the agent can run
+# `kubectl logs`. Use:
+#   docker compose -f docker-compose.yml -f docker-compose.kube.yml up --build
+# Override the directory with KUBE_DIR=/path/to/.kube if yours is elsewhere.
+services:
+  api:
+    environment:
+      KUBECONFIG: /home/app/.kube/config
+    volumes:
+      - ${KUBE_DIR:-${HOME}/.kube}:/home/app/.kube:ro
