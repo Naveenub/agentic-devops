@@ -3,7 +3,7 @@
 Applies to contributions to `product/`, `tests/test_product.py` and `Dockerfile.product`.
 Contributions to everything else are accepted under Apache-2.0 (Section 5 of `LICENSE`) and need no CLA.
 
-"Licensor" is [LICENSOR LEGAL NAME]. "You" is the individual, or the entity on whose behalf an
+"Licensor" is {{LEGAL_NAME}}. "You" is the individual, or the entity on whose behalf an
 individual signs, who submits a Contribution. "Contribution" is any code, documentation or other
 work you intentionally submit to Licensor for inclusion in `product/`.
 
@@ -27,7 +27,7 @@ work you intentionally submit to Licensor for inclusion in `product/`.
    against Licensor and its licensees.
 5. **No obligation.** Licensor need not accept, use or credit any Contribution. Contributions are
    provided "as is", without warranty, except as stated in Section 3.
-6. **Governing law.** [GOVERNING LAW], same as `product/LICENSE`.
+6. **Governing law.** {{GOVERNING_LAW}}, same as `product/LICENSE`.
 
 ## How to sign
 
@@ -38,7 +38,7 @@ Add one line to `.github/CLA-SIGNATORIES.txt` in your first pull request to `pro
 ```
 
 Adding the line is your electronic signature. Company contributors: an authorised signatory must
-sign for the company by email to [LEGAL CONTACT EMAIL] first.
+sign for the company by email to {{LEGAL_EMAIL}} first.
 
 Counsel to confirm: signature mechanism, whether a separate corporate CLA is needed, and the
 final text. Remove the "DRAFT" marker when approved.

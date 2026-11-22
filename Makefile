@@ -1,4 +1,4 @@
-.PHONY: help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync billing-report
+.PHONY: legal-check legal-fill help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync billing-report
 
 help:
 	@echo "Targets: test eval live-eval report report-check ingest up image image-product"
@@ -45,3 +45,12 @@ image:
 # Commercial image (adds product/, see LICENSING.md). Builds the core image first.
 image-product: image
 	docker build -f Dockerfile.product -t agentic-devops-product .
+
+# Legal readiness (see LICENSING.md): exit 1 while any entity field is blank, counsel has not signed off, or
+# product/LICENSE / CLA.md still hold {{PLACEHOLDERS}}. Run before publishing the repo or opening signup.
+legal-check:
+	python -m product.legal check
+
+# Write the values from product/legal_docs/entity.json into product/LICENSE and CLA.md
+legal-fill:
+	python -m product.legal fill

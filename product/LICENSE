@@ -1,9 +1,9 @@
 DevOps AI Agent — Commercial Product Layer License
 Version 0.1 (DRAFT — pending counsel review; see "Status" at the end)
 
-Copyright (c) 2026 [LICENSOR LEGAL NAME]. All rights reserved.
+Copyright (c) 2026 {{LEGAL_NAME}}. All rights reserved.
 
-"Licensor" means [LICENSOR LEGAL NAME], [jurisdiction/entity type], contact: [LEGAL CONTACT EMAIL].
+"Licensor" means {{LEGAL_NAME}}, {{ENTITY_TYPE}}, contact: {{LEGAL_EMAIL}}.
 "Software" means every file in this directory (product/), tests/test_product.py and
 Dockerfile.product, and any copy or derivative of them. Everything else in this repository is
 licensed under the Apache License 2.0 (see the top-level LICENSE) and is not affected by this file.
@@ -53,18 +53,19 @@ licensed under the Apache License 2.0 (see the top-level LICENSE) and is not aff
    TO THE MAXIMUM EXTENT PERMITTED BY LAW, LICENSOR IS NOT LIABLE FOR ANY INDIRECT, INCIDENTAL,
    SPECIAL, CONSEQUENTIAL OR PUNITIVE DAMAGES, OR LOSS OF PROFITS, DATA OR GOODWILL, ARISING OUT OF
    THIS LICENCE OR THE SOFTWARE. LICENSOR'S TOTAL LIABILITY UNDER THIS LICENCE IS LIMITED TO
-   [USD 100] [counsel to confirm].
+   {{LIABILITY_CAP}}.
 
 10. General
-   Governing law: [GOVERNING LAW]. Venue: [COURTS/ARBITRATION]. If any provision is unenforceable,
+   Governing law: {{GOVERNING_LAW}}. Venue: {{VENUE}}. If any provision is unenforceable,
    the rest remains in effect. A commercial licence, if signed, prevails over this file.
 
-Commercial licensing: [LEGAL/SALES CONTACT EMAIL OR URL]
+Commercial licensing: {{SALES_CONTACT}}
 
 Status
 This text replaces the earlier one-paragraph placeholder with usable terms, but it was drafted
 without legal review and is NOT final. Before this repository (or product/) is published or
-licensed to anyone, counsel must: fill every [BRACKETED] field, confirm the evaluation/production
+licensed to anyone, counsel must: fill every double-brace placeholder (set the values in product/legal_docs/entity.json, then run
+`python -m product.legal fill`), confirm the evaluation/production
 boundary, liability cap, governing law and export/sanctions language, and decide whether a
 standalone commercial licence agreement (pricing, support, audit rights, term) is needed.
 Then delete this Status section and the "DRAFT" marker.

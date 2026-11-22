@@ -1,10 +1,11 @@
+import json
 import os
 
 import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from product import billing, mailer, plans as plans_mod, store, subscriptions
+from product import billing, legal, mailer, plans as plans_mod, store, subscriptions
 
 
 @pytest.fixture
@@ -18,6 +19,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("PRODUCT_ADMIN_KEY", "adm")
     monkeypatch.setenv("AGENT_LLM", "off")
     monkeypatch.setenv("PRODUCT_SIGNUP", "on")  # signup is closed unless opened; most tests need it open
+    legal_file = tmp_path / "entity.json"  # signup also needs the legal documents to be published
+    legal_file.write_text(json.dumps({**{k: "x" for k in legal.FIELDS}, "COUNSEL_REVIEWED": True}))
+    monkeypatch.setenv("PRODUCT_LEGAL_FILE", str(legal_file))
     monkeypatch.delenv("AGENT_API_KEY", raising=False)
     for k in ("PRODUCT_SMTP_HOST", "PRODUCT_SMTP_FROM", "PRODUCT_PUBLIC_URL", "STRIPE_SECRET_KEY"):
         monkeypatch.delenv(k, raising=False)
@@ -29,7 +33,8 @@ _n = iter(range(10**6))
 
 def _signup(c, name="acme", email=None, **headers):
     """POST /signup with a unique email unless one is given (emails are unique per tenant)."""
-    return c.post("/signup", json={"name": name, "email": email or f"user{next(_n)}@example.com"}, headers=headers)
+    return c.post("/signup", json={"name": name, "email": email or f"user{next(_n)}@example.com", "accept_terms": True},
+                  headers=headers)
 
 
 def _tenant(c, plan="free", name="acme"):
@@ -489,18 +494,18 @@ def test_signup_creates_free_tenant_and_working_key(env):
 def test_signup_ignores_requested_plan_and_validates(env):
     c, _ = env
     ok = {"name": "x", "email": "a@example.com"}
-    assert c.post("/signup", json={**ok, "plan": "enterprise"}).json()["plan"] == "free"
-    assert c.post("/signup", json={"email": "b@example.com"}).status_code == 422
-    assert c.post("/signup", json={"name": "   ", "email": "b@example.com"}).status_code == 422
-    assert c.post("/signup", json={"name": 5, "email": "b@example.com"}).status_code == 422
-    assert c.post("/signup", json={"name": "x" * 101, "email": "b@example.com"}).status_code == 422
+    assert c.post("/signup", json={**ok, "plan": "enterprise", "accept_terms": True}).json()["plan"] == "free"
+    assert c.post("/signup", json={"email": "b@example.com", "accept_terms": True}).status_code == 422
+    assert c.post("/signup", json={"name": "   ", "email": "b@example.com", "accept_terms": True}).status_code == 422
+    assert c.post("/signup", json={"name": 5, "email": "b@example.com", "accept_terms": True}).status_code == 422
+    assert c.post("/signup", json={"name": "x" * 101, "email": "b@example.com", "accept_terms": True}).status_code == 422
 
 
 def test_signup_requires_a_valid_unique_email(env):
     c, _ = env
     for bad in (None, "", "   ", "nope", "a@b", "a b@example.com", "a@@example.com", 5, "x" * 250 + "@example.com",
                 "a@example.com\r\nBcc: evil@example.com"):
-        r = c.post("/signup", json={"name": "x", "email": bad})
+        r = c.post("/signup", json={"name": "x", "email": bad, "accept_terms": True})
         assert r.status_code == 422, bad
     assert c.post("/signup", json={"name": "x"}).status_code == 422
     assert _signup(c, email="dup@example.com").status_code == 200
@@ -921,3 +926,68 @@ def test_stripe_report_stamps_usage_into_its_own_month(env):
     assert billing.report_usage(post=lambda d: (calls.append(d), R())[1]) == {"reported": 2, "failed": 0}
     assert sorted(int(d["timestamp"]) for d in calls) == [jan, feb]
     assert billing.report_usage(post=lambda d: R())["reported"] == 0
+
+
+# ---- legal documents and the signup gate -----------------------------------------------------------
+
+def _legal_file(tmp_path, monkeypatch, **over):
+    f = tmp_path / "e.json"
+    f.write_text(json.dumps({**{k: f"v-{k}" for k in legal.FIELDS}, "COUNSEL_REVIEWED": True, **over}))
+    monkeypatch.setenv("PRODUCT_LEGAL_FILE", str(f))
+
+
+def test_legal_pages_and_signup_stay_closed_until_the_setup_is_complete(env, tmp_path):
+    c, mp = env
+    mp.delenv("PRODUCT_LEGAL_FILE")  # the shipped entity.json has no values and COUNSEL_REVIEWED=false
+    assert not legal.configured() and "COUNSEL_REVIEWED" in legal.missing()
+    for slug in legal.TITLES:
+        r = c.get(f"/{slug}")
+        assert r.status_code == 503 and "{{" not in r.text and "not been published" in r.text
+    assert c.post("/signup", json={"name": "x", "email": "a@example.com", "accept_terms": True}).status_code == 403
+    assert "Sign up" in c.get("/pricing").text and "Start free" not in c.get("/pricing").text
+    _legal_file(tmp_path, mp, LEGAL_EMAIL="")  # one blank field is enough
+    assert legal.missing() == ["LEGAL_EMAIL"] and c.get("/terms").status_code == 503
+    _legal_file(tmp_path, mp, COUNSEL_REVIEWED=False)  # filled in but not approved
+    assert legal.missing() == ["COUNSEL_REVIEWED"] and c.get("/privacy").status_code == 503
+    assert _signup(c).status_code == 403
+
+
+def test_legal_pages_render_the_entity_values_escaped_and_are_linked_everywhere(env, tmp_path):
+    c, mp = env
+    _legal_file(tmp_path, mp, LEGAL_NAME="Acme <script>alert(1)</script> Ltd", LIABILITY_CAP="USD 100",
+                REFUND_WINDOW_DAYS=14)
+    for slug, title in legal.TITLES.items():
+        r = c.get(f"/{slug}")
+        assert r.status_code == 200 and title in r.text and "{{" not in r.text
+        assert "<script>alert" not in r.text
+        assert slug == "refunds" or "Acme &lt;script&gt;" in r.text  # the refund page never names the company
+        assert r.headers["content-security-policy"].startswith("default-src 'none'")
+        for other in legal.TITLES:  # footer on every page
+            assert f'href="/{other}"' in r.text
+    assert "USD 100" in c.get("/terms").text and "14 days" in c.get("/refunds").text
+    assert 'href="/terms"' in c.get("/pricing").text and 'href="/privacy"' in c.get("/signup").text
+
+
+def test_signup_needs_explicit_acceptance_and_records_the_version(env):
+    c, _ = env
+    body = {"name": "x", "email": "ok@example.com"}
+    for bad in ({}, {"accept_terms": False}, {"accept_terms": "true"}, {"accept_terms": 1}):
+        r = c.post("/signup", json={**body, **bad})
+        assert r.status_code == 422 and "accept_terms" in r.text
+    assert "I accept the" in c.get("/signup").text and "accept_terms" in c.get("/signup").text
+    t = c.post("/signup", json={**body, "accept_terms": True}).json()
+    with store.conn() as db:
+        row = db.execute("SELECT terms_version, terms_accepted_at FROM tenants WHERE id=?", (t["id"],)).fetchone()
+    assert row[0] == legal.VERSION and row[1] > 0
+    admin = _tenant(c)  # operator-created tenants have a separate contract; nothing is claimed for them
+    with store.conn() as db:
+        assert tuple(db.execute("SELECT terms_version, terms_accepted_at FROM tenants WHERE id=?",
+                                (admin["id"],)).fetchone()) == (None, None)
+
+
+def test_shipped_legal_texts_only_use_known_tokens():
+    shipped = [legal.source(s) for s in legal.TITLES] + [f.read_text() for f in legal.FILES_WITH_TOKENS]
+    used = {tok for text in shipped for tok in legal.TOKEN.findall(text)}
+    assert used <= set(legal.FIELDS), used - set(legal.FIELDS)
+    assert legal.fill("{{LEGAL_NAME}} {{VENUE}}", {"LEGAL_NAME": " A  B "}) == "A B {{VENUE}}"  # blanks stay visible
+    assert legal.unresolved_tokens()  # the shipped licence files still have tokens until `python -m product.legal fill`

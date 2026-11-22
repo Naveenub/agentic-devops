@@ -529,7 +529,7 @@ Contributions to the open core are accepted under Apache-2.0. Changes to `produc
 
 ## 📄 License
 
-Apache License 2.0 for the open core; `product/` is under a separate commercial license. See [LICENSING.md](LICENSING.md).
+Apache License 2.0 for the open core; `product/` is under a separate commercial license. See [LICENSING.md](LICENSING.md), which also covers the Terms of Service, Privacy Policy, DPA and refund text for the hosted service (`product/legal_docs/`, `make legal-check`).
 
 ---
 

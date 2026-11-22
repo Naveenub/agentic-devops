@@ -6,12 +6,15 @@
   GET  /recover    lost key: ask for an emailed link, or (from the link) create a new key (HTML, public)
   POST /recover    {"email": "..."} -> 202 whether or not the address is registered; a one-time link is emailed if it is
   POST /recover/confirm {"token": "..."} -> new API key (once); every older key of that tenant is revoked
+  GET  /terms /privacy /dpa /refunds   the legal documents (HTML, public; 503 until product/legal_docs/entity.json is
+                    complete and COUNSEL_REVIEWED is true, see product/legal.py)
   GET  /account    paste your API key: usage, upgrade (Stripe Checkout) and "Manage billing" (Stripe portal)
   GET  /billing    JSON state the account page renders (tenant auth, X-API-Key)
 
 Paying is the existing flow: /account calls POST /billing/checkout and POST /billing/portal.
 
-  PRODUCT_SIGNUP=on             open public signup. Closed unless set: every free account can spend the server's LLM
+  PRODUCT_SIGNUP=on             open public signup. Also needs the legal documents published (python -m product.legal check)
+                                and every signup must accept them. Closed unless set: every free account can spend the server's LLM
                                 tokens, so opening it is the operator's call. (POST /signup -> 403 while closed;
                                 operators still use POST /admin/tenants.)
   PRODUCT_SIGNUP_PER_IP_HOUR    default 5     PRODUCT_SIGNUP_PER_DAY   default 200 (whole deployment)
@@ -30,7 +33,7 @@ import secrets
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from product import mailer, store, subscriptions
+from product import legal, mailer, store, subscriptions
 from product.admin import require_enabled
 from product.auth import current_tenant
 from product.plans import _load
@@ -56,8 +59,9 @@ def _ordered_plans() -> list:
 
 
 def signup_open() -> bool:
-    """Closed unless the operator opts in (see module docstring)."""
-    return (os.getenv("PRODUCT_SIGNUP") or "").lower() in ("on", "1", "true", "yes", "open")
+    """Closed unless the operator opts in (see module docstring) AND the legal documents are published: nobody
+    should accept terms that still have blanks, or that counsel has not signed off."""
+    return (os.getenv("PRODUCT_SIGNUP") or "").lower() in ("on", "1", "true", "yes", "open") and legal.configured()
 
 
 def _client_ip(request: Request) -> str:
@@ -77,6 +81,9 @@ def signup(payload: dict, request: Request):
     No Stripe call here, so anonymous traffic cannot create Stripe customers."""
     if not signup_open():
         raise HTTPException(status_code=403, detail="signup is closed")
+    if payload.get("accept_terms") is not True:
+        raise HTTPException(status_code=422, detail="'accept_terms' must be true: you must accept the Terms of Service "
+                                                    "and Privacy Policy (/terms, /privacy)")
     name = payload.get("name")
     if not isinstance(name, str) or not name.strip():
         raise HTTPException(status_code=422, detail="'name' is required")
@@ -91,7 +98,7 @@ def signup(payload: dict, request: Request):
                             _int_env("PRODUCT_SIGNUP_PER_DAY", 200)):
         raise HTTPException(status_code=429, detail="too many signups, try again later", headers={"Retry-After": "3600"})
     try:
-        t = store.create_tenant(name, "free", email)
+        t = store.create_tenant(name, "free", email, terms_version=legal.VERSION)
     except store.EmailTaken:
         raise HTTPException(status_code=409, detail="an account with that email already exists; " + (
             "use key recovery to get a new key" if mailer.configured() else "ask the operator for a new key"))
@@ -162,7 +169,7 @@ CSS = """
 :root{--bg:#fafaf9;--fg:#1c1917;--mut:#57534e;--card:#fff;--line:#e7e5e4;--acc:#4338ca;--accfg:#fff;--bad:#b91c1c;--ok:#15803d}
 @media(prefers-color-scheme:dark){:root{--bg:#0c0a09;--fg:#f5f5f4;--mut:#a8a29e;--card:#1c1917;--line:#292524;--acc:#818cf8;--accfg:#0c0a09;--bad:#f87171;--ok:#4ade80}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
-header,main{max-width:1000px;margin:0 auto;padding:0 16px}header{display:flex;gap:20px;align-items:center;padding-top:20px;padding-bottom:12px}
+header,main,footer{max-width:1000px;margin:0 auto;padding:0 16px}footer{display:flex;gap:18px;flex-wrap:wrap;padding-top:32px;padding-bottom:28px;font-size:.88rem}header{display:flex;gap:20px;align-items:center;padding-top:20px;padding-bottom:12px}
 header b{margin-right:auto}a{color:var(--acc)}h1{font-size:1.9rem;margin:28px 0 6px}p.lead{color:var(--mut);margin:0 0 24px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;display:flex;flex-direction:column}
@@ -173,7 +180,7 @@ header b{margin-right:auto}a{color:var(--acc)}h1{font-size:1.9rem;margin:28px 0 
 input{font:inherit;width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
 label{display:block;font-weight:600;margin:14px 0 6px}.box{max-width:520px}.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
 code{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:2px 6px;word-break:break-all}
-.msg{margin-top:14px;min-height:1.4em}.err{color:var(--bad)}.ok{color:var(--ok)}
+label.chk{display:flex;gap:10px;align-items:flex-start;font-weight:400;margin-top:16px}label.chk input{width:auto;margin-top:5px}.msg{margin-top:14px;min-height:1.4em}.err{color:var(--bad)}.ok{color:var(--ok)}
 table{border-collapse:collapse;width:100%;margin-top:10px}td,th{text-align:left;padding:7px 4px;border-bottom:1px solid var(--line)}
 .fine{color:var(--mut);font-size:.88rem;margin-top:22px}.fine.tight{margin-top:6px}.price .note{font-size:1rem;font-weight:400;color:var(--mut)}[hidden]{display:none!important}
 """
@@ -184,7 +191,9 @@ def _page(title: str, body: str, script: str = "", cache: bool = True) -> HTMLRe
     doc = (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
            f'<title>{html.escape(title)}</title><style nonce="{nonce}">{CSS}</style></head><body>'
            f'<header><b>DevOps AI Agent</b><a href="/pricing">Pricing</a><a href="/signup">Sign up</a><a href="/account">Account</a></header>'
-           f'<main>{body}</main>' + (f'<script nonce="{nonce}">{script}</script>' if script else "") + '</body></html>')
+           f'<main>{body}</main>'
+           '<footer><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/dpa">DPA</a><a href="/refunds">Refunds</a></footer>'
+           + (f'<script nonce="{nonce}">{script}</script>' if script else "") + '</body></html>')
     csp = (f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; "
            "img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
     headers = {"Content-Security-Policy": csp, "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
@@ -244,7 +253,9 @@ def signup_page():
             '<input id="name" name="name" maxlength="100" required autocomplete="organization">'
             '<label for="email">Email</label>'
             '<input id="email" name="email" type="email" maxlength="254" required autocomplete="email">'
-            '<p class="fine tight">Only used to recover a lost key. No marketing.</p>'
+            '<p class="fine tight">Only used to recover a lost key and for service notices. No marketing.</p>'
+            '<label class="chk"><input id="terms" name="terms" type="checkbox" required> I accept the <a href="/terms">Terms of Service</a> '
+            'and have read the <a href="/privacy">Privacy Policy</a>. If I send personal data, the <a href="/dpa">DPA</a> applies.</label>'
             '<div class="row"><button type="submit">Create account</button></div>'
             '<div id="msg" class="msg" role="status"></div></form>'
             '<div id="done" class="box" hidden><p>Your API key (shown once, copy it now):</p><p><code id="key"></code></p>'
@@ -257,7 +268,7 @@ const want=new URLSearchParams(location.search).get('plan')||'';
 $('f').addEventListener('submit',async ev=>{
   ev.preventDefault();$('msg').className='msg';$('msg').textContent='Creating…';
   try{
-    const r=await fetch('/signup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('name').value,email:$('email').value})});
+    const r=await fetch('/signup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('name').value,email:$('email').value,accept_terms:$('terms').checked})});
     const b=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(typeof b.detail==='string'?b.detail:'Signup failed ('+r.status+')');
     try{sessionStorage.setItem('adk_key',b.api_key)}catch(e){}
@@ -376,3 +387,20 @@ $('kf').addEventListener('submit',ev=>{ev.preventDefault();key=$('k').value.trim
 load();
 """
     return _page("Account", body, script, cache=False)
+
+
+# ---- legal documents ---------------------------------------------------------------------------------
+
+def _legal_page(slug: str) -> HTMLResponse:
+    body = legal.render(slug)
+    if body is None:
+        r = _page(legal.TITLES[slug], f'<h1>{html.escape(legal.TITLES[slug])}</h1><p class="lead">This document has not '
+                                      'been published yet.</p>')
+        r.status_code = 503
+        return r
+    return _page(legal.TITLES[slug], body)
+
+
+for _slug in legal.TITLES:
+    web_router.add_api_route(f"/{_slug}", (lambda s=_slug: lambda: _legal_page(s))(), methods=["GET"],
+                             response_class=HTMLResponse, name=f"legal_{_slug}")

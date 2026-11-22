@@ -1,0 +1,15 @@
+{
+  "_readme": "Facts only you can supply. Fill every field, have counsel review product/legal_docs/*.md, product/LICENSE and CLA.md, then set COUNSEL_REVIEWED to true. Until then the legal pages answer 503 and public signup stays closed. Check with: python -m product.legal check",
+  "LEGAL_NAME": null,
+  "ENTITY_TYPE": null,
+  "LEGAL_ADDRESS": null,
+  "LEGAL_EMAIL": null,
+  "SALES_CONTACT": null,
+  "GOVERNING_LAW": null,
+  "VENUE": null,
+  "LIABILITY_CAP": null,
+  "REFUND_WINDOW_DAYS": null,
+  "HOSTING_PROVIDER": null,
+  "EFFECTIVE_DATE": null,
+  "COUNSEL_REVIEWED": false
+}

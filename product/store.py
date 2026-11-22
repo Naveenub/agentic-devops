@@ -21,7 +21,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS tenants (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, plan TEXT NOT NULL DEFAULT 'free',
   stripe_customer_id TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
-  stripe_subscription_id TEXT, subscription_status TEXT, email TEXT);
+  stripe_subscription_id TEXT, subscription_status TEXT, email TEXT,
+  terms_version TEXT, terms_accepted_at REAL);
 CREATE TABLE IF NOT EXISTS stripe_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, received_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS api_keys (
   key_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), prefix TEXT NOT NULL,
@@ -47,7 +48,9 @@ CREATE TABLE IF NOT EXISTS job_runs (name TEXT PRIMARY KEY, last_run REAL NOT NU
 PG_SCHEMA = (re.sub(r"\bREAL\b", "DOUBLE PRECISION",
                     SCHEMA.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
                     .replace("quantity INTEGER", "quantity BIGINT"))
-             + "CREATE UNIQUE INDEX IF NOT EXISTS tenants_email_uq ON tenants(email);\n")
+             + "CREATE UNIQUE INDEX IF NOT EXISTS tenants_email_uq ON tenants(email);\n"
+             "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS terms_version TEXT;\n"
+             "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS terms_accepted_at DOUBLE PRECISION;\n")
 
 RECOVERY_TTL = 1800  # seconds a recovery link stays valid
 RECOVERY_COOLDOWN = 600  # at most one recovery email per tenant in this window (stops mailbombing a registered address)
@@ -95,10 +98,11 @@ def _migrate(c) -> None:
     """Databases created before the Stripe lifecycle / key recovery lack these tenant columns (SQLite only;
     PostgreSQL databases are created from the current schema)."""
     have = {r[1] for r in c.execute("PRAGMA table_info(tenants)")}
-    for col in ("stripe_subscription_id", "subscription_status", "email"):
+    for col, typ in (("stripe_subscription_id", "TEXT"), ("subscription_status", "TEXT"), ("email", "TEXT"),
+                     ("terms_version", "TEXT"), ("terms_accepted_at", "REAL")):
         if col not in have:
             try:
-                c.execute(f"ALTER TABLE tenants ADD COLUMN {col} TEXT")
+                c.execute(f"ALTER TABLE tenants ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError:  # another process added it first
                 pass
     # Emails are stored normalised, so a plain unique index is case-insensitive; NULLs (older tenants) never clash.
@@ -200,15 +204,18 @@ def month_start(now: float | None = None) -> float:
     return datetime(d.year, d.month, 1, tzinfo=timezone.utc).timestamp()
 
 
-def create_tenant(name: str, plan: str = "free", email: str | None = None) -> dict:
-    """`email` must already be normalised (clean_email). Raises EmailTaken if another tenant has it."""
+def create_tenant(name: str, plan: str = "free", email: str | None = None, terms_version: str | None = None) -> dict:
+    """`email` must already be normalised (clean_email). Raises EmailTaken if another tenant has it.
+    `terms_version` records that the signer accepted that version of the legal documents (and when)."""
     from product.plans import get_plan
     get_plan(plan)  # validates
     tid = "ten_" + secrets.token_hex(8)
     try:
         with conn() as c:
-            c.execute("INSERT INTO tenants(id,name,plan,created_at,email) VALUES(?,?,?,?,?)",
-                      (tid, name, plan, time.time(), email))
+            now = time.time()
+            c.execute("INSERT INTO tenants(id,name,plan,created_at,email,terms_version,terms_accepted_at) "
+                      "VALUES(?,?,?,?,?,?,?)",
+                      (tid, name, plan, now, email, terms_version, now if terms_version else None))
     except INTEGRITY_ERRORS:  # the only unique column besides the random id is email
         raise EmailTaken(email)
     return {"id": tid, "name": name, "plan": plan, **({"email": email} if email else {})}
