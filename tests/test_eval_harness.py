@@ -80,6 +80,41 @@ def test_hallucination_eval_fails_a_fabricated_llm_diagnosis(monkeypatch):
     assert hallucination_eval.main() == 1
 
 
+def _one_case(**over):
+    case = {"id": "X", "tier": "golden", "query": "why is the worker exiting?",
+            "observations": [{"source": "k", "content": "FATAL: too many open files\nworker exiting with status 24"}],
+            "expected_category": "other_llm",
+            "llm_fixture": {"diagnosis": "Too many open files; the worker exited.",
+                            "evidence": ["FATAL: too many open files"], "suggestions": []}}
+    return {**case, **over}
+
+
+def test_judge_mode_scores_the_live_model_not_the_fixture(monkeypatch):
+    seen = []
+    monkeypatch.setattr(hallucination_eval, "load_cases", lambda: [_one_case()])
+    monkeypatch.setattr(hallucination_eval, "run_case_agent",
+                        lambda c, live=False: seen.append(live) or {"diagnosis_source": "llm", "diagnosis": "Too many open files."})
+    llm.set_client(lambda s, u: json.dumps({"supported": [True]}))
+    hallucination_eval.main(["--judge"])
+    hallucination_eval.main([])
+    assert seen == [True, False]
+
+
+def test_judge_failure_fails_the_run_instead_of_scoring_lexically(monkeypatch):
+    monkeypatch.setattr(hallucination_eval, "load_cases", lambda: [_one_case()])
+    monkeypatch.setattr(hallucination_eval, "run_case_agent",
+                        lambda c, live=False: {"diagnosis_source": "llm", "diagnosis": "Too many open files."})
+    llm.set_client(lambda s, u: "not json")  # judge enabled but useless
+    assert hallucination_eval.main(["--judge"]) == 1
+
+
+def test_judge_mode_skips_offline_only_cases(monkeypatch, capsys):
+    monkeypatch.setattr(hallucination_eval, "load_cases", lambda: [_one_case(offline_only=True)])
+    llm.set_client(lambda s, u: json.dumps({"supported": [True]}))
+    assert hallucination_eval.main(["--judge"]) == 0
+    assert "SKIP (offline_only)" in capsys.readouterr().out
+
+
 # --- eval harness -----------------------------------------------------------------------------
 
 def test_golden_set_covers_every_category_and_guardrail_cases():
