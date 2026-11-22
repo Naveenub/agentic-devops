@@ -6,3 +6,4 @@ pydantic
 slack_sdk
 pytest
 httpx
+boto3

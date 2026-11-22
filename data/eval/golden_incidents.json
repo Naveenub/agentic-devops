@@ -1,12 +1,22 @@
 [
   {
+    "id": "GOLD-001",
     "query": "payments-api pod restarting",
-    "expected_root_cause": "OOMKilled"
-  }
-]
-[
+    "observations": [
+      {"source": "kubectl logs", "content": "Error: Java heap space\nKilled process 12345 (java) total-vm:512000kB\nContainer terminated with exit code 137"}
+    ],
+    "expected_category": "oom_killed",
+    "expected_root_cause": "OOMKilled",
+    "expected_sources": ["data/runbooks/eks-oomkill.md"]
+  },
   {
-    "question": "Why is payments-api crashing?",
-    "expected_root_cause": "Insufficient memory limits"
+    "id": "GOLD-002",
+    "query": "Why is payments-api crashing?",
+    "observations": [
+      {"source": "kubectl logs", "content": "Error: Java heap space\nContainer terminated with exit code 137"}
+    ],
+    "expected_category": "oom_killed",
+    "expected_root_cause": "Insufficient memory limits",
+    "expected_sources": ["data/runbooks/eks-oomkill.md", "data/incidents/2024-11-eks-oom.json"]
   }
 ]

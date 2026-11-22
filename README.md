@@ -513,4 +513,6 @@ Notes:
 
 * `data/synthetic/incidents.json` is hand-written test data, never ingested into the knowledge base.
 * The CI log tool (`agent/tools/github.py`) is a **labelled mock**; mock and failed-tool observations are never used as evidence and contribute zero confidence.
-* Default retriever is local/offline; set `AGENT_RETRIEVER=chroma` to use Chroma (`make ingest` first).
+* Default retriever is local/offline; set `AGENT_RETRIEVER=chroma` to use Chroma (`make ingest` first). Chroma's default embedder downloads a model on first use; set `CHROMA_EMBEDDER=hash` for a deterministic offline embedder.
+* `make eval` runs the golden-incident check and the unsupported-token check from `data/eval/` (offline).
+* `agent/tools/aws_costs.py` is a z-score check over read-only Cost Explorer data; it returns no verdict (`anomaly: None`) when data is missing.

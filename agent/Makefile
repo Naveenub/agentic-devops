@@ -1,2 +1,2 @@
 eval:
-	python agent/eval.py
+	cd .. && python -m agent.eval

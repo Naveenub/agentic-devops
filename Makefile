@@ -4,6 +4,7 @@ ingest:
 	python -m agent.memory.ingest
 
 eval:
+	python -m agent.eval
 	python -m agent.hallucination_eval
 
 test:

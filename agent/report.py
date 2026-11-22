@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-os.environ.setdefault("AGENT_RETRIEVER", "local")
+os.environ["AGENT_RETRIEVER"] = "local"  # reproducible regardless of caller env
 
 from agent.orchestrator import run_agent  # noqa: E402
 from agent.signatures import UNKNOWN  # noqa: E402
