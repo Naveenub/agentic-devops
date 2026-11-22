@@ -181,6 +181,12 @@ def test_api_key_required_on_analyze_and_cost_check(api):
     assert sent == []
 
 
+def test_docs_are_off_and_healthz_is_open(api):
+    bare = TestClient(api[0].app)
+    assert [bare.get(p).status_code for p in ("/docs", "/redoc", "/openapi.json")] == [404, 404, 404]
+    assert bare.get("/healthz").json() == {"ok": True}
+
+
 def test_slack_command_rejects_bad_signature_stale_ts_and_missing_secret(api):
     client, sent, mp = api
     body = {"text": "pod exit code 137", "channel_id": "C9"}

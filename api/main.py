@@ -25,7 +25,8 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="DevOps AI Agent", lifespan=lifespan)
+# Schema/docs routes are off: they would publish the API surface unauthenticated.
+app = FastAPI(title="DevOps AI Agent", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 router = APIRouter()
 graph = build_graph()
 
@@ -43,6 +44,11 @@ def _run(question: str, extra: dict | None = None) -> dict:
     state = {"question": question}
     state.update({k: v for k, v in (extra or {}).items() if k in ("kubernetes", "github", "cost")})
     return graph.invoke(state)
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 
 @app.post("/analyze", dependencies=[Depends(require_api_key)])
