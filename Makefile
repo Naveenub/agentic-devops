@@ -1,4 +1,4 @@
-.PHONY: help ingest eval live-eval test report report-check up image image-product
+.PHONY: help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync
 
 help:
 	@echo "Targets: test eval live-eval report report-check ingest up image image-product"
@@ -22,6 +22,13 @@ report:
 
 report-check:
 	python -m agent.report --check
+
+# Stripe vs product/plans.py: check exits 1 on drift; sync creates what is missing and prints the env to set
+stripe-check:
+	python -m product.stripe_sync
+
+stripe-sync:
+	python -m product.stripe_sync --apply
 
 # Open-core API on http://localhost:8000
 up:

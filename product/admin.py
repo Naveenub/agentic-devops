@@ -3,7 +3,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from product import billing, metering, store, subscriptions
+from product import billing, metering, store, stripe_sync, subscriptions
 from product.auth import current_tenant, require_admin
 
 def require_enabled() -> None:
@@ -108,6 +108,13 @@ def tenant_usage(tid: str):
 @admin.post("/billing/report")
 def report():
     return billing.report_usage()
+
+
+@admin.get("/billing/drift")
+def billing_drift():
+    """Stripe meters/prices vs product/plans.py. Empty list = in sync; fix with `python -m product.stripe_sync --apply`."""
+    drift, _ = _stripe(stripe_sync.sync)
+    return {"in_sync": not drift, "drift": drift}
 
 
 @tenant_router.get("/usage")

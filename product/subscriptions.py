@@ -15,7 +15,6 @@ import hashlib
 import hmac
 import json
 import os
-import threading
 import time
 
 import httpx
@@ -70,95 +69,6 @@ def prices_for(plan: str) -> list[tuple[str, bool]]:
 def purchasable(plan: str) -> bool:
     """True when Stripe is configured and the plan has a Checkout price (never for `free`)."""
     return plan != "free" and bool(os.getenv("STRIPE_SECRET_KEY")) and bool(prices_for(plan))
-
-
-# ---- price labels for /pricing ------------------------------------------------------------------
-
-PRICE_TTL = 3600  # seconds a looked-up label is reused: /pricing is public, so Stripe is never called per request
-PRICE_RETRY = 60  # after a failed lookup, nothing is retried for this long (a slow Stripe must not slow every page view)
-_labels: dict = {}  # (plan, price ids) -> (valid until, label)
-_down_until = 0.0
-_labels_lock = threading.Lock()
-
-ZERO_DECIMAL = {"BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"}
-THREE_DECIMAL = {"BHD", "JOD", "KWD", "OMR", "TND"}
-SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£", "INR": "₹", "JPY": "¥"}
-
-
-def clear_price_cache() -> None:
-    global _down_until
-    with _labels_lock:
-        _labels.clear()
-        _down_until = 0.0
-
-
-def _money(minor: int, currency: str) -> str:
-    """Stripe amounts are in the currency's smallest unit: 4900 USD = $49, 5000 JPY = ¥5,000."""
-    cur = currency.upper()
-    div = 1 if cur in ZERO_DECIMAL else 1000 if cur in THREE_DECIMAL else 100
-    whole, frac = divmod(int(minor), div)
-    text = f"{whole:,}" + (f".{frac:0{len(str(div)) - 1}d}" if frac else "")
-    return f"{SYMBOLS[cur]}{text}" if cur in SYMBOLS else f"{cur} {text}"
-
-
-def _per(recurring: dict) -> str:
-    n, unit = int(recurring.get("interval_count") or 1), recurring.get("interval") or "month"
-    return f"/ {unit}" if n == 1 else f"/ {n} {unit}s"
-
-
-def label_from_prices(prices: list[dict]) -> str:
-    """'$49 / month', '$99 / month + usage' or 'Usage-based', from Stripe price objects. '' whenever there is no
-    single honest figure (tiered or customer-chosen amounts, mixed currencies or intervals, one-time fees)."""
-    flat, usage = [], False
-    for p in prices:
-        rec = p.get("recurring") or {}
-        if rec.get("usage_type") == "metered":
-            usage = True
-        elif p.get("unit_amount") is None or not p.get("currency") or not rec:
-            return ""
-        else:
-            flat.append(p)
-    if not flat:
-        return "Usage-based" if usage else ""
-    if len({p["currency"].lower() for p in flat}) > 1 or len({_per(p["recurring"]) for p in flat}) > 1:
-        return ""
-    label = f"{_money(sum(p['unit_amount'] for p in flat), flat[0]['currency'])} {_per(flat[0]['recurring'])}"
-    return label + (" + usage" if usage else "")
-
-
-def stripe_price_label(plan: str, get=None, now: float | None = None) -> str:
-    """The price to show on /pricing for a purchasable plan, read from the Stripe prices behind
-    STRIPE_PRICE_<PLAN>. '' when the plan is not purchasable, Stripe cannot be read, or the price has no single
-    figure; the page then falls back to 'Shown at checkout'. Cached for PRICE_TTL; a failure backs off PRICE_RETRY."""
-    global _down_until
-    if not purchasable(plan):
-        return ""
-    ids = prices_for(plan)
-    cache_key, now = (plan, tuple(ids)), (time.time() if now is None else now)
-    with _labels_lock:  # one refresh at a time, so a cold cache cannot stampede Stripe
-        hit = _labels.get(cache_key)
-        if hit and hit[0] > now:
-            return hit[1]
-        if now < _down_until:
-            return ""
-        key = _key()
-        get = get or (lambda url: httpx.get(url, auth=(key, ""), timeout=4))
-        try:
-            prices = []
-            for pid, _ in ids:
-                r = get(f"{API}/prices/{pid}")
-                if r.status_code >= 300:
-                    raise StripeError(f"Stripe error {r.status_code}")
-                prices.append(r.json())
-        except (StripeError, httpx.HTTPError, ValueError):  # ValueError: a body that is not JSON
-            _down_until = now + PRICE_RETRY
-            return ""
-        try:
-            label = label_from_prices(prices)
-        except (KeyError, TypeError, ValueError, AttributeError):  # a price object we do not understand
-            label = ""
-        _labels[cache_key] = (now + PRICE_TTL, label)
-        return label
 
 
 def plan_for_prices(price_ids: list[str]) -> str | None:

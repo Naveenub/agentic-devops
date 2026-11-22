@@ -1,6 +1,6 @@
 """Customer-facing layer: public pricing page, self-serve signup and an account/billing page.
 
-  GET  /pricing    plans, included usage, prices (read from Stripe), what is purchasable (HTML, public)
+  GET  /pricing    plans, included usage, prices (from plans.py), what is purchasable (HTML, public)
   GET  /signup     signup form (HTML, public)
   POST /signup     {"name": "...", "email": "..."} -> tenant on `free` + API key (once)
   GET  /recover    lost key: ask for an emailed link, or (from the link) create a new key (HTML, public)
@@ -19,8 +19,8 @@ Paying is the existing flow: /account calls POST /billing/checkout and POST /bil
   PRODUCT_TRUST_PROXY=1         take the client IP from the last X-Forwarded-For entry (set only behind a proxy
                                 that appends it, else callers can spoof their IP and dodge the per-IP limits)
   PRODUCT_CONTACT_URL           where plans that cannot be bought online (e.g. enterprise) send people
-  PRODUCT_PLANS                 "price_label" per plan overrides the price read from Stripe, e.g.
-                                {"pro": {"price_label": "$99 / month"}}
+  PRODUCT_PLANS                 prices come from plans.py (base_cents / overage per plan); overriding them here means
+                                re-running `python -m product.stripe_sync --apply` so Stripe matches
 Key recovery needs outbound mail (PRODUCT_SMTP_*, PRODUCT_PUBLIC_URL; see mailer.py); without it /recover answers 503."""
 import html
 import json
@@ -219,9 +219,7 @@ def pricing():
             cta = f'<a class="btn" href="{href}">Choose {e(p.name)}</a>'
         else:
             cta = contact_btn or '<a class="btn" aria-disabled="true" href="#">Not available yet</a>'
-        # An operator-set label wins; otherwise the price comes from Stripe (cached), else "shown at checkout".
-        label = p.price_label or (subscriptions.stripe_price_label(p.name) if buy else "")
-        price = e(label) if label else ('<span class="note">Shown at checkout</span>' if buy else "")
+        price = e(p.price_label)  # same numbers Stripe is provisioned with (product/stripe_sync.py)
         cards.append(f'<div class="card"><h2>{e(p.name)}</h2><div class="price">{price}</div><ul>{"".join(items)}</ul>{cta}</div>')
     lead = ("Start on the free plan; upgrade any time from your account page. " if opened else
             "Sign-up is closed right now; if you already have an account, upgrade from your account page. ")

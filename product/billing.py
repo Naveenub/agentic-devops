@@ -1,8 +1,8 @@
 """Stripe usage reporting via Billing Meter events (v1/billing/meter_events), over httpx.
 
   STRIPE_SECRET_KEY            required to report; unset = usage is only exported (GET /admin/usage)
-  STRIPE_METER_<EVENT>         meter event_name per event, e.g. STRIPE_METER_ANALYZE=agent_analyze_runs
-Prices/tiers (included units, overage rates) live in Stripe on the meter's price; this layer only
+  STRIPE_METER_<EVENT>         meter event_name per event, must equal plans.METERS, e.g. STRIPE_METER_ANALYZE=agent_analyze_runs
+Prices/tiers come from product/plans.py (provisioned and checked by product/stripe_sync.py); this layer only
 reports quantities. Each batch carries an `identifier`, so a retry never double-bills."""
 import os
 

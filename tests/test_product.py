@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from product import billing, mailer, store
+from product import billing, mailer, plans as plans_mod, store, subscriptions
 
 
 @pytest.fixture
@@ -14,7 +14,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_API_KEY", raising=False)
     for k in ("PRODUCT_SMTP_HOST", "PRODUCT_SMTP_FROM", "PRODUCT_PUBLIC_URL", "STRIPE_SECRET_KEY"):
         monkeypatch.delenv(k, raising=False)
-    subscriptions.clear_price_cache()  # the label cache is process-wide; tests must not see each other's prices
     return TestClient(app), monkeypatch
 
 
@@ -532,11 +531,10 @@ def test_signup_is_closed_unless_the_operator_opens_it(env):
 
 def test_pricing_page_lists_plans_and_only_offers_what_can_be_bought(stripe_env):
     c, mp, _, _ = stripe_env
-    mp.setenv("PRODUCT_PLANS", '{"pro": {"price_label": "$99 / month"}}')
     r = c.get("/pricing")
     assert r.status_code == 200 and "text/html" in r.headers["content-type"]
     page = r.text
-    assert "50 analyze runs / month" in page and "Unlimited" in page and "$99 / month" in page
+    assert "50 analyze runs / month" in page and "Unlimited" in page and "$99 / month + usage" in page
     assert "/signup?plan=starter" in page and "/signup?plan=pro" in page
     assert "/signup?plan=enterprise" not in page and "Not available yet" in page  # no price configured
     mp.setenv("PRODUCT_CONTACT_URL", "mailto:sales@example.com")
@@ -547,7 +545,7 @@ def test_pricing_page_lists_plans_and_only_offers_what_can_be_bought(stripe_env)
 
 def test_pricing_page_escapes_configured_text(env):
     c, mp = env
-    mp.setenv("PRODUCT_PLANS", '{"free": {"price_label": "<script>alert(1)</script>"}}')
+    mp.setenv("PRODUCT_PLANS", '{"free": {"currency": "<script>alert(1)</script>"}}')
     mp.setenv("PRODUCT_CONTACT_URL", '"><script>x</script>')
     page = c.get("/pricing").text
     assert "<script>alert(1)" not in page and "<script>x</script>" not in page
@@ -596,130 +594,44 @@ def test_billing_state_without_stripe_offers_nothing(env):
     assert s["purchasable"] == [] and s["can_manage"] is False
 
 
-# ---- prices on /pricing are read from Stripe ----------------------------------------------------
+# ---- prices on /pricing come from plans.py ------------------------------------------------------
 
 import re as _re
 
-import httpx as _httpx
-
-
-def _price(amount, cur="usd", interval="month", metered=False, count=1, **extra):
-    return {"unit_amount": None if metered else amount, "currency": cur,
-            "recurring": {"interval": interval, "interval_count": count, "usage_type": "metered" if metered else "licensed"},
-            **extra}
-
-
-@pytest.fixture
-def stripe_prices(stripe_env, monkeypatch):
-    c, mp, _, _ = stripe_env
-    table = {"price_starter": _price(4900), "price_pro": _price(9900), "price_use": _price(None, metered=True)}
-    seen = []
-
-    def fake_get(url, auth, timeout):
-        seen.append(url)
-        pid = url.rsplit("/", 1)[-1]
-        return _R(table[pid]) if pid in table else _R({}, 404)
-
-    monkeypatch.setattr(subscriptions.httpx, "get", fake_get)
-    return c, mp, table, seen
-
-
-def test_pricing_shows_prices_read_from_stripe_and_caches_them(stripe_prices):
-    c, _, _, seen = stripe_prices
-    page = c.get("/pricing").text
-    assert "$49 / month" in page and "$99 / month + usage" in page and "Shown at checkout" not in page
-    assert sorted(seen) == ["https://api.stripe.com/v1/prices/price_pro", "https://api.stripe.com/v1/prices/price_starter",
-                            "https://api.stripe.com/v1/prices/price_use"]
-    c.get("/pricing"), c.get("/pricing")
-    assert len(seen) == 3  # a public page must not turn every view into Stripe calls
-
-
-def test_configured_price_label_beats_stripe(stripe_prices):
-    c, mp, _, seen = stripe_prices
-    mp.setenv("PRODUCT_PLANS", '{"starter": {"price_label": "From $39"}}')
-    page = c.get("/pricing").text
-    assert "From $39" in page and "$49 / month" not in page and "$99 / month + usage" in page
-    assert not any(u.endswith("price_starter") for u in seen)
-
-
-def test_pricing_survives_stripe_trouble_and_does_not_hammer_it(stripe_env, monkeypatch):
+def test_pricing_shows_catalog_prices_without_calling_stripe(stripe_env, monkeypatch):
     c, _, _, _ = stripe_env
-    calls = []
 
-    def down(url, auth, timeout):
-        calls.append(url)
-        raise _httpx.ConnectError("no route")
+    def boom(*a, **k):
+        raise AssertionError("/pricing must not call Stripe")
 
-    monkeypatch.setattr(subscriptions.httpx, "get", down)
-    for _ in range(3):
-        r = c.get("/pricing")
-        assert r.status_code == 200 and r.text.count("Shown at checkout") == 2  # starter and pro
-    assert len(calls) == 1  # one failed attempt, then a back-off, not one per plan per view
-    subscriptions.clear_price_cache()
-    for bad in (_R({}, 500), _R({}, 404)):
-        monkeypatch.setattr(subscriptions.httpx, "get", lambda url, auth, timeout, bad=bad: bad)
-        assert "Shown at checkout" in c.get("/pricing").text
-        subscriptions.clear_price_cache()
-
-    class NotJson:
-        status_code = 200
-
-        def json(self):
-            raise ValueError("not json")
-
-    monkeypatch.setattr(subscriptions.httpx, "get", lambda url, auth, timeout: NotJson())
-    assert "Shown at checkout" in c.get("/pricing").text
+    monkeypatch.setattr(subscriptions.httpx, "get", boom)
+    page = c.get("/pricing").text
+    assert "$0" in page and "$49 / month + usage" in page and "$99 / month + usage" in page
+    assert "Shown at checkout" not in page
 
 
-def test_price_label_cache_expires_and_backs_off(stripe_env):
-    subscriptions.clear_price_cache()
-    calls = []
-
-    def get(url):
-        calls.append(url)
-        return _R(_price(4900))
-
-    label = subscriptions.stripe_price_label
-    assert label("starter", get=get, now=1000) == "$49 / month"
-    assert label("starter", get=get, now=1000 + subscriptions.PRICE_TTL - 1) == "$49 / month" and len(calls) == 1
-    assert label("starter", get=get, now=1000 + subscriptions.PRICE_TTL + 1) == "$49 / month" and len(calls) == 2
-    assert label("free", get=get, now=0) == "" and label("enterprise", get=get, now=0) == ""  # not purchasable: no lookup
-
-    subscriptions.clear_price_cache()
-
-    def boom(url):
-        raise _httpx.ConnectError("down")
-
-    assert label("starter", get=boom, now=0) == ""
-    n = len(calls)
-    assert label("pro", get=get, now=subscriptions.PRICE_RETRY - 1) == "" and len(calls) == n  # still backing off
-    assert label("pro", get=get, now=subscriptions.PRICE_RETRY + 1) != ""  # recovered
+def test_price_override_goes_through_plans_not_free_text(stripe_env):
+    c, mp, _, _ = stripe_env
+    mp.setenv("PRODUCT_PLANS", '{"starter": {"base_cents": 3900, "overage": {}}}')
+    page = c.get("/pricing").text
+    assert "$39 / month + usage" in page  # overage merges with the default; rates stay in plans.py
+    mp.setenv("PRODUCT_PLANS", '{"starter": {"currency": "<script>alert(1)</script>"}}')
+    assert "<script>alert(1)" not in c.get("/pricing").text
 
 
 def test_price_formatting():
-    money, label = subscriptions._money, subscriptions.label_from_prices
+    money = plans_mod.money
     assert money(4900, "usd") == "$49" and money(4950, "USD") == "$49.50" and money(5, "usd") == "$0.05"
     assert money(5000, "jpy") == "¥5,000" and money(1234567, "inr") == "₹12,345.67"
     assert money(1500, "chf") == "CHF 15" and money(1500, "kwd") == "KWD 1.500"
-    assert label([_price(4900)]) == "$49 / month"
-    assert label([_price(12000, count=3)]) == "$120 / 3 months" and label([_price(49000, interval="year")]) == "$490 / year"
-    assert label([_price(2000), _price(3000)]) == "$50 / month"  # flat prices on one plan add up
-    assert label([_price(9900), _price(None, metered=True)]) == "$99 / month + usage"
-    assert label([_price(None, metered=True)]) == "Usage-based"
-    # no single honest figure -> no label, so the page says "Shown at checkout" instead of guessing
-    assert label([]) == ""
-    assert label([_price(1000), _price(1000, cur="eur")]) == ""
-    assert label([_price(1000), _price(1000, interval="year")]) == ""
-    assert label([{"unit_amount": None, "currency": "usd", "billing_scheme": "tiered",
-                   "recurring": {"interval": "month", "usage_type": "licensed"}}]) == ""
-    assert label([{"unit_amount": 500, "currency": "usd", "recurring": None}]) == ""  # one-time fee
 
 
-def test_stripe_supplied_price_text_is_escaped(stripe_prices):
-    c, _, table, _ = stripe_prices
-    table["price_starter"] = _price(4900, cur="<script>alert(1)</script>")
-    page = c.get("/pricing").text
-    assert "<script>alert(1)" not in page and "&lt;SCRIPT&gt;" in page
+def test_every_paid_plan_has_a_price_and_billed_events_are_metered():
+    for name, p in plans_mod.PLANS.items():
+        if name in ("free", "enterprise"):
+            continue
+        assert p.base_cents, name  # a paid plan with no price in the repo is the bug this guards against
+        assert set(p.overage) <= set(plans_mod.EVENTS) and all(p.monthly_quota[e] is not None for e in p.overage)
 
 
 def test_pricing_when_signup_is_closed_sends_people_to_their_account(stripe_env):
