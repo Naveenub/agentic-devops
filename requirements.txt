@@ -3,3 +3,6 @@ uvicorn
 langgraph
 chromadb
 pydantic
+slack_sdk
+pytest
+httpx

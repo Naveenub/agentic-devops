@@ -1,31 +1,29 @@
-from agent.memory.chroma import query_knowledge
+from agent.memory.retrieval import retrieve
+import os
 
-def diagnose(state):
-    """
-    Use RAG to diagnose the issue based on historical incidents and runbooks.
-    """
+from agent.signatures import CORROBORATING, DIAGNOSIS, UNKNOWN, classify
+from agent.state import AgentState, real_observations
 
-    results = query_knowledge(state.query, n_results=3)
 
-    documents = results.get("documents", [[]])[0]
-    metadatas = results.get("metadatas", [[]])[0]
+def diagnose(state: AgentState) -> dict:
+    """Classify from real observations only; retrieval corroborates, it never decides."""
+    obs = real_observations(state)
+    category, evidence = UNKNOWN, []
+    for o in obs:
+        category, line = classify(o["content"])
+        if category != UNKNOWN:
+            evidence.append(f'{o["source"]}: {line}')
+            break
 
-    if not documents:
-        state.diagnosis = "Insufficient historical data to determine root cause."
-        state.sources = []
-        return state
+    query = " ".join([state.get("question", "")] + [o["content"][:1000] for o in obs])
+    rag_sources = [h.source for h in retrieve(query, n=3)] if category != UNKNOWN else []
+    # cite only retrieved sources that actually match the diagnosed category
+    corroborating = CORROBORATING.get(category, set())
+    evidence += [f"retrieved: {s}" for s in rag_sources if os.path.basename(s) in corroborating]
 
-    # Simple heuristic diagnosis for MVP
-    if "oom" in " ".join(documents).lower():
-        state.diagnosis = "Pod was OOMKilled due to insufficient memory limits."
-    elif "accessdenied" in " ".join(documents).lower():
-        state.diagnosis = "Terraform failed due to missing IAM permissions."
-    else:
-        state.diagnosis = "Issue matches known incidents but requires manual review."
-
-    state.sources = [
-        meta.get("source", "unknown")
-        for meta in metadatas
-    ]
-
-    return state
+    return {
+        "category": category,
+        "diagnosis": DIAGNOSIS[category],
+        "evidence": evidence,
+        "rag_sources": rag_sources,
+    }

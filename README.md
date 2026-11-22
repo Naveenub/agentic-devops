@@ -496,3 +496,21 @@ If you’ve ever thought:
 > “I wish Kubernetes errors explained themselves…”
 
 This project is for you 🚀
+
+---
+
+## 🧾 Synthetic Incident Report
+
+Offline and deterministic (no LLM, no embedding download, no cluster access):
+
+```bash
+make test           # unit tests
+make report         # writes reports/incident_report.{md,json} from data/synthetic/incidents.json
+make report-check   # CI: fails if the committed report is stale or any case fails
+```
+
+Notes:
+
+* `data/synthetic/incidents.json` is hand-written test data, never ingested into the knowledge base.
+* The CI log tool (`agent/tools/github.py`) is a **labelled mock**; mock and failed-tool observations are never used as evidence and contribute zero confidence.
+* Default retriever is local/offline; set `AGENT_RETRIEVER=chroma` to use Chroma (`make ingest` first).

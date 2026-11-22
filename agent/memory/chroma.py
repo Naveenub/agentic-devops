@@ -1,19 +1,16 @@
-from chromadb import Client
-from chromadb.config import Settings
+from chromadb import PersistentClient
 
-_client = Client(Settings(persist_directory=".chroma"))
+_client = PersistentClient(path=".chroma")
 _collection = _client.get_or_create_collection("devops")
 
+
 def query_knowledge(query: str, n_results: int = 3, where: dict | None = None):
-    results = _collection.query(
+    return _collection.query(
         query_texts=[query],
         n_results=n_results,
-        where=where
+        where=where,
     )
 
+
 def add_documents(documents, metadatas, ids):
-    _collection.add(
-        documents=documents,
-        metadatas=metadatas,
-        ids=ids
-    )
+    _collection.upsert(documents=documents, metadatas=metadatas, ids=ids)

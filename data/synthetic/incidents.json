@@ -1,0 +1,78 @@
+{
+  "meta": {
+    "synthetic": true,
+    "description": "Hand-written test incidents. Not real telemetry. Never ingested into the knowledge base.",
+    "scoring": "known category: confidence >= min_confidence and cited; unknown: confidence must be 0.0"
+  },
+  "cases": [
+    {
+      "id": "SYN-001",
+      "question": "payments-api pods keep restarting",
+      "observations": [
+        {"source": "kubectl logs", "content": "Last State: Terminated\n  Reason: OOMKilled\n  Exit Code: 137\nBack-off restarting failed container"}
+      ],
+      "expected_category": "oom_killed",
+      "min_confidence": 0.6
+    },
+    {
+      "id": "SYN-002",
+      "question": "orders-api is crash looping after the traffic spike",
+      "observations": [
+        {"source": "kubectl logs", "content": "Exception in thread \"main\" java.lang.OutOfMemoryError: Java heap space\nContainer terminated with exit code 137"}
+      ],
+      "expected_category": "oom_killed",
+      "min_confidence": 0.6
+    },
+    {
+      "id": "SYN-003",
+      "question": "terraform apply failed in CI",
+      "observations": [
+        {"source": "ci log", "content": "Error: AccessDeniedException: User is not authorized to perform iam:PassRole\non resource arn:aws:iam::000000000000:role/example-ci\nTerraform exited with code 1"}
+      ],
+      "expected_category": "iam_denied",
+      "min_confidence": 0.6
+    },
+    {
+      "id": "SYN-004",
+      "question": "nightly deploy pipeline is failing since this morning",
+      "observations": [
+        {"source": "ci log", "content": "An error occurred (ExpiredToken) when calling the AssumeRole operation:\nThe security token included in the request is expired"}
+      ],
+      "expected_category": "credentials_expired",
+      "min_confidence": 0.6
+    },
+    {
+      "id": "SYN-005",
+      "question": "new release pods never become ready",
+      "observations": [
+        {"source": "kubectl describe", "content": "Warning  Failed  kubelet  Failed to pull image \"registry.example.com/app:v9\": manifest unknown\nWarning  Failed  kubelet  Error: ErrImagePull\nNormal   BackOff kubelet  Back-off pulling image\nStatus: ImagePullBackOff"}
+      ],
+      "expected_category": "image_pull",
+      "min_confidence": 0.6
+    },
+    {
+      "id": "SYN-006",
+      "question": "checkout latency p99 is elevated",
+      "observations": [
+        {"source": "app logs", "content": "INFO request completed in 2310ms\nINFO request completed in 2480ms\nINFO cache hit ratio 0.41"}
+      ],
+      "expected_category": "unknown"
+    },
+    {
+      "id": "SYN-007",
+      "question": "why did the GitHub Action fail?",
+      "github": {"repo": "example/app", "run_id": "1"},
+      "expected_category": "unknown",
+      "expect_mock_observation": true
+    },
+    {
+      "id": "SYN-008",
+      "question": "I think this is an OOM kill, confirm?",
+      "observations": [
+        {"source": "ci log", "content": "Error: AccessDeniedException: User is not authorized to perform s3:PutObject"}
+      ],
+      "expected_category": "iam_denied",
+      "min_confidence": 0.5
+    }
+  ]
+}

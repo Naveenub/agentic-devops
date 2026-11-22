@@ -2,10 +2,12 @@
 
 import os
 import json
-from agent.memory.chroma import add_documents
 
 SUPPORTED_TEXT_EXTENSIONS = {".md", ".txt", ".log"}
 SUPPORTED_JSON_EXTENSIONS = {".json"}
+
+KNOWLEDGE_TYPES = {"runbook", "incident"}  # logs / eval / synthetic data must not enter the KB
+
 
 def ingest_directory(base_path="data"):
     documents = []
@@ -16,6 +18,9 @@ def ingest_directory(base_path="data"):
         for file in files:
             path = os.path.join(root, file)
             ext = os.path.splitext(file)[1]
+
+            if infer_type(path) not in KNOWLEDGE_TYPES:
+                continue
 
             try:
                 if ext in SUPPORTED_JSON_EXTENSIONS:
@@ -40,18 +45,22 @@ def ingest_directory(base_path="data"):
                 print(f"⚠️ Skipping {path}: {e}")
 
     if documents:
+        from agent.memory.chroma import add_documents  # lazy: keeps infer_type importable without chromadb
+
         add_documents(documents, metadatas, ids)
         print(f"✅ Ingested {len(documents)} documents")
 
 def infer_type(path: str) -> str:
+    if "synthetic" in path:  # check first: "synthetic/incidents.json" contains "incidents"
+        return "synthetic"
+    if "eval" in path:
+        return "eval"
     if "runbooks" in path:
         return "runbook"
     if "incidents" in path:
         return "incident"
     if "logs" in path:
         return "log"
-    if "eval" in path:
-        return "eval"
     return "unknown"
 
 if __name__ == "__main__":

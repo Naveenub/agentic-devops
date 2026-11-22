@@ -1,5 +1,16 @@
+.PHONY: ingest eval test report report-check
+
 ingest:
-	python agent/memory/ingest.py
+	python -m agent.memory.ingest
 
 eval:
-	python agent/hallucination_eval.py
+	python -m agent.hallucination_eval
+
+test:
+	python -m pytest -q
+
+report:
+	python -m agent.report
+
+report-check:
+	python -m agent.report --check

@@ -1,16 +1,18 @@
-def calculate_confidence(state):
-    score = 0.0
+import os
 
-    if state.get("observations"):
-        score += 0.4
+from agent.signatures import CORROBORATING, UNKNOWN
+from agent.state import AgentState, real_observations
 
-    if state.get("rag_sources"):
+
+def calculate_confidence(state: AgentState) -> float:
+    """0.0 if no known signature; 0.5 for a log signature; +0.3 if a retrieved
+    runbook/incident corroborates the category. Mock/error observations never count."""
+    category = state.get("category", UNKNOWN)
+    if category == UNKNOWN or not real_observations(state) or not state.get("evidence"):
+        return 0.0
+
+    score = 0.5
+    corroborating = CORROBORATING.get(category, set())
+    if any(os.path.basename(s) in corroborating for s in state.get("rag_sources", [])):
         score += 0.3
-
-    if "uncertain" in state.get("diagnosis", "").lower():
-        score -= 0.2
-
-    if "no data" in state.get("diagnosis", "").lower():
-        score -= 0.3
-
-    return round(min(max(score, 0.0), 1.0), 2)
+    return round(min(score, 1.0), 2)

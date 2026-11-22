@@ -1,0 +1,122 @@
+{
+  "cases": [
+    {
+      "cited": true,
+      "confidence": 0.8,
+      "evidence": [
+        "kubectl logs: Reason: OOMKilled",
+        "retrieved: data/runbooks/eks-oomkill.md",
+        "retrieved: data/incidents/2024-11-eks-oom.json"
+      ],
+      "expected": "oom_killed",
+      "failed_checks": [],
+      "got": "oom_killed",
+      "id": "SYN-001",
+      "mock_observation": false,
+      "passed": true
+    },
+    {
+      "cited": true,
+      "confidence": 0.8,
+      "evidence": [
+        "kubectl logs: Exception in thread \"main\" java.lang.OutOfMemoryError: Java heap space",
+        "retrieved: data/runbooks/eks-oomkill.md",
+        "retrieved: data/incidents/2024-11-eks-oom.json"
+      ],
+      "expected": "oom_killed",
+      "failed_checks": [],
+      "got": "oom_killed",
+      "id": "SYN-002",
+      "mock_observation": false,
+      "passed": true
+    },
+    {
+      "cited": true,
+      "confidence": 0.8,
+      "evidence": [
+        "ci log: Error: AccessDeniedException: User is not authorized to perform iam:PassRole",
+        "retrieved: data/runbooks/terraform-iam-deny.md",
+        "retrieved: data/incidents/2024-12-tf-apply-fail.json"
+      ],
+      "expected": "iam_denied",
+      "failed_checks": [],
+      "got": "iam_denied",
+      "id": "SYN-003",
+      "mock_observation": false,
+      "passed": true
+    },
+    {
+      "cited": true,
+      "confidence": 0.8,
+      "evidence": [
+        "ci log: An error occurred (ExpiredToken) when calling the AssumeRole operation:",
+        "retrieved: data/incidents/2025-01-ci-permission.json"
+      ],
+      "expected": "credentials_expired",
+      "failed_checks": [],
+      "got": "credentials_expired",
+      "id": "SYN-004",
+      "mock_observation": false,
+      "passed": true
+    },
+    {
+      "cited": true,
+      "confidence": 0.8,
+      "evidence": [
+        "kubectl describe: Warning  Failed  kubelet  Error: ErrImagePull",
+        "retrieved: data/runbooks/imagepullbackoff.md"
+      ],
+      "expected": "image_pull",
+      "failed_checks": [],
+      "got": "image_pull",
+      "id": "SYN-005",
+      "mock_observation": false,
+      "passed": true
+    },
+    {
+      "cited": false,
+      "confidence": 0.0,
+      "evidence": [],
+      "expected": "unknown",
+      "failed_checks": [],
+      "got": "unknown",
+      "id": "SYN-006",
+      "mock_observation": false,
+      "passed": true
+    },
+    {
+      "cited": false,
+      "confidence": 0.0,
+      "evidence": [],
+      "expected": "unknown",
+      "failed_checks": [],
+      "got": "unknown",
+      "id": "SYN-007",
+      "mock_observation": true,
+      "passed": true
+    },
+    {
+      "cited": true,
+      "confidence": 0.8,
+      "evidence": [
+        "ci log: Error: AccessDeniedException: User is not authorized to perform s3:PutObject",
+        "retrieved: data/runbooks/terraform-iam-deny.md"
+      ],
+      "expected": "iam_denied",
+      "failed_checks": [],
+      "got": "iam_denied",
+      "id": "SYN-008",
+      "mock_observation": false,
+      "passed": true
+    }
+  ],
+  "dataset": "data/synthetic/incidents.json",
+  "summary": {
+    "cases": 8,
+    "category_accuracy": 1.0,
+    "failed": 0,
+    "mean_confidence_known": 0.8,
+    "passed": 8
+  },
+  "synthetic": true
+}

@@ -1,18 +1,16 @@
-from langgraph.graph import StateGraph
+from langgraph.graph import END, START, StateGraph
+
+from agent.orchestrator import PIPELINE
 from agent.state import AgentState
-from agent.nodes.observe import observe
-from agent.nodes.diagnose import diagnose
-from agent.nodes.suggest import suggest
+
 
 def build_graph():
     graph = StateGraph(AgentState)
-
-graph.add_node("observer", observe_k8s)
-graph.add_node("diagnoser", diagnose_with_rag)
-graph.add_node("suggestor", suggest_fix)
-
-graph.set_entry_point("observer")
-graph.add_edge("observer", "diagnoser")
-graph.add_edge("diagnoser", "suggestor")
-
+    for name, node in PIPELINE:
+        graph.add_node(name, node)
+    names = [name for name, _ in PIPELINE]
+    graph.add_edge(START, names[0])
+    for a, b in zip(names, names[1:]):
+        graph.add_edge(a, b)
+    graph.add_edge(names[-1], END)
     return graph.compile()

@@ -1,23 +1,34 @@
-from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, TypedDict
 
-@dataclass
-class AgentState:
-    query: str
-    logs: Optional[str] = None
-    diagnosis: Optional[str] = None
-    suggestion: Optional[str] = None
-    sources: List[str] = field(default_factory=list)
-    confidence: float = 0.0
 
-class AgentState(TypedDict):
+class Observation(TypedDict, total=False):
+    source: str      # e.g. "kubectl logs", "github actions"
+    content: str
+    mock: bool       # True: placeholder data, never used as evidence
+    error: bool      # True: tool failed, content is the error message
+
+
+class AgentState(TypedDict, total=False):
+    # input
     question: str
-    observations: list
+    kubernetes: dict          # optional: {"namespace": str, "pod": str}
+    github: dict              # optional: {"repo": str, "run_id": str}
+    # observe
+    observations: List[Observation]
+    # diagnose
+    category: str             # see agent.signatures; "unknown" if no signature matched
     diagnosis: str
-    suggestions: list
-    rag_sources: list
+    evidence: List[str]
+    rag_sources: List[str]
+    # suggest
+    suggestions: List[str]
     confidence: float
+    answer: str
 
-from agent.confidence import calculate_confidence
 
-state["confidence"] = calculate_confidence(state)
+def real_observations(state: AgentState) -> List[Observation]:
+    """Observations that may be used as evidence (no mocks, no tool errors)."""
+    return [
+        o for o in state.get("observations", [])
+        if not o.get("mock") and not o.get("error") and o.get("content")
+    ]

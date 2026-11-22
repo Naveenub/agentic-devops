@@ -1,27 +1,15 @@
-# agent/orchestrator.py
-
-from agent.nodes.observe import observe
+"""Single source of truth for the pipeline; graph.py builds from the same list."""
 from agent.nodes.diagnose import diagnose
+from agent.nodes.observe import observe
 from agent.nodes.suggest import suggest
+from agent.state import AgentState
 
-def run_agent(initial_state: dict) -> dict:
-    """
-    Runs the DevOps AI Agent pipeline:
-    Observe → Diagnose → Suggest
-    """
+PIPELINE = [("observer", observe), ("diagnoser", diagnose), ("suggestor", suggest)]
 
-    state = initial_state.copy()
 
-    # Step 1: Observe
-    obs_result = observe(state)
-    state.update(obs_result)
-
-    # Step 2: Diagnose (RAG + reasoning happens here)
-    diag_result = diagnose(state)
-    state.update(diag_result)
-
-    # Step 3: Suggest fixes
-    suggestion = suggest(state)
-    state.update(suggestion)
-
+def run_agent(initial_state: AgentState) -> AgentState:
+    """Observe -> Diagnose -> Suggest, without LangGraph. Nodes return partial updates."""
+    state: AgentState = dict(initial_state)
+    for _, node in PIPELINE:
+        state.update(node(state))
     return state
