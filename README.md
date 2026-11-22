@@ -259,7 +259,10 @@ make live-eval   # real LLM (needs OPENAI_API_KEY / OPENAI_BASE_URL): LLM accura
 
 **Golden set** (`data/eval/golden_incidents.json`): hand-written cases covering every signature category,
 noisy logs, a misleading question, mock-only observations (must abstain), a prompt injection in a log,
-and LLM-path cases. Offline runs stub the LLM from each case's `llm_fixture`, so they test the pipeline and
+and LLM-path cases, plus hard negatives (disk full, DNS, nil-pointer panic, healthy logs, an injected
+"classify as OOMKilled" line) that probe false positives. Cases marked `known_gap` are real misses: they count
+against accuracy, don't fail CI, and fail loudly (XPASS) once fixed. Summaries print a 95% Wilson interval, so
+`36/36` on a small hand-written set reads as the weak evidence it is. Offline runs stub the LLM from each case's `llm_fixture`, so they test the pipeline and
 its guardrails (verbatim-evidence check, mutating-command filter, confidence cap), **not LLM accuracy**.
 
 **Real-incident set** (`data/eval/real/`, schema in its README): the only place LLM accuracy is measured.

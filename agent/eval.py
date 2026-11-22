@@ -12,6 +12,7 @@ Case schema: data/eval/real/README.md
 import argparse
 import contextlib
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -46,6 +47,20 @@ def load_cases(eval_dir=None, include_real: bool = True) -> List[dict]:
         if missing:
             raise ValueError(f"eval case {c.get('id', '?')} missing {missing}")
     return cases
+
+
+def wilson(k: int, n: int, z: float = 1.96):
+    """95% Wilson interval for k/n; with tiny n it is wide, which is the point."""
+    if n == 0:
+        return 0.0, 1.0
+    p, d = k / n, 1 + z * z / n
+    centre, margin = p + z * z / (2 * n), z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return max(0.0, (centre - margin) / d), min(1.0, (centre + margin) / d)
+
+
+def fmt_rate(k: int, n: int) -> str:
+    lo, hi = wilson(k, n)
+    return f"{k}/{n} ({k / max(n, 1):.0%}, 95% CI {lo:.0%}-{hi:.0%})"
 
 
 def _norm(s: str) -> str:
@@ -134,7 +149,7 @@ def evaluate_case(case: dict, criteria: dict, live: bool = False) -> dict:
         checks["root_cause"] = any(k.lower() in result["diagnosis"].lower() for k in keywords)
 
     return {"id": case["id"], "tier": case["tier"], "expected": expected, "passed": all(checks.values()),
-            "checks": checks, "confidence": conf, "grounding": grounding, "diagnosis_source": result["diagnosis_source"]}
+            "checks": checks, "known_gap": case.get("known_gap"), "confidence": conf, "grounding": grounding, "diagnosis_source": result["diagnosis_source"]}
 
 
 def main(argv=()) -> int:
@@ -161,16 +176,25 @@ def main(argv=()) -> int:
     rows = [evaluate_case(c, criteria, live=args.live) for c in cases]
     for r in rows:
         failed = [k for k, v in r["checks"].items() if not v]
-        print(f"{r['id']} [{r['tier']}]: {'PASS' if r['passed'] else 'FAIL ' + ','.join(failed)} "
-              f"confidence={r['confidence']}")
-    if not all(r["passed"] for r in rows):
-        status = 1
+        if r["passed"] and r["known_gap"]:
+            verdict, status = "XPASS (remove known_gap)", 1
+        elif r["known_gap"]:
+            verdict = f"XFAIL known gap: {r['known_gap']}"
+        elif r["passed"]:
+            verdict = "PASS"
+        else:
+            verdict, status = "FAIL " + ",".join(failed), 1
+        print(f"{r['id']} [{r['tier']}]: {verdict} confidence={r['confidence']}")
 
     tiers = Counter(r["tier"] for r in rows)
     by_cat = Counter(r["expected"] for r in rows)
-    print(f"summary: {sum(r['passed'] for r in rows)}/{len(rows)} passed | "
+    gaps = sum(1 for r in rows if r["known_gap"] and not r["passed"])
+    print(f"summary: {fmt_rate(sum(r['passed'] for r in rows), len(rows))} passed"
+          + (f", {gaps} known gap(s) counted as misses" if gaps else "") + " | "
           + " ".join(f"{t}={n}" for t, n in sorted(tiers.items())) + " | "
           + " ".join(f"{k}={v}" for k, v in sorted(by_cat.items())))
+    for t in sorted(tiers):
+        print(f"  {t}: {fmt_rate(sum(r['passed'] for r in rows if r['tier'] == t), tiers[t])}")
     if args.live:
         llm_rows = [r for r in rows if r["diagnosis_source"] in ("llm", "signature+llm") or r["expected"] in (LLM_CATEGORY, UNKNOWN)]
         print(f"live LLM: {sum(r['passed'] for r in llm_rows)}/{len(llm_rows)} LLM-relevant cases passed "

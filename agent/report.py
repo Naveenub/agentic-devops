@@ -13,6 +13,7 @@ from pathlib import Path
 os.environ["AGENT_RETRIEVER"] = "local"  # reproducible regardless of caller env
 os.environ.pop("GITHUB_TOKEN", None)     # never hit the network: the github tool then fails fast
 
+from agent.eval import wilson  # noqa: E402
 from agent.orchestrator import run_agent  # noqa: E402
 from agent.signatures import UNKNOWN  # noqa: E402
 
@@ -65,6 +66,8 @@ def build_report(dataset_path: Path = DATASET) -> dict:
     rows = [run_case(c) for c in data["cases"]]
     passed = sum(r["passed"] for r in rows)
     known = [r for r in rows if r["expected"] != UNKNOWN]
+    correct = sum(r["got"] == r["expected"] for r in rows)
+    lo, hi = wilson(correct, len(rows))
     return {
         "dataset": dataset_path.relative_to(ROOT).as_posix(),
         "synthetic": data["meta"]["synthetic"],
@@ -72,7 +75,8 @@ def build_report(dataset_path: Path = DATASET) -> dict:
             "cases": len(rows),
             "passed": passed,
             "failed": len(rows) - passed,
-            "category_accuracy": round(sum(r["got"] == r["expected"] for r in rows) / len(rows), 3),
+            "category_accuracy": round(correct / len(rows), 3),
+            "category_accuracy_ci95": [round(lo, 3), round(hi, 3)],
             "mean_confidence_known": round(sum(r["confidence"] for r in known) / max(len(known), 1), 3),
         },
         "cases": rows,
@@ -88,7 +92,8 @@ def to_markdown(report: dict) -> str:
         "Mock and failed-tool observations are excluded from diagnosis and confidence.",
         "",
         f"- Cases: {s['cases']} | Passed: {s['passed']} | Failed: {s['failed']}",
-        f"- Category accuracy: {s['category_accuracy']:.1%}",
+        f"- Category accuracy: {s['category_accuracy']:.1%} (95% CI {s['category_accuracy_ci95'][0]:.0%}-"
+        f"{s['category_accuracy_ci95'][1]:.0%}, n={s['cases']}; hand-written, not evidence of real-world accuracy)",
         f"- Mean confidence (known categories): {s['mean_confidence_known']}",
         "",
         "| ID | Expected | Got | Confidence | Cited | Mock obs | Tool error | Result |",

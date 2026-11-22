@@ -3,7 +3,7 @@
 Dataset: `data/synthetic/incidents.json` - synthetic, not real telemetry. Mock and failed-tool observations are excluded from diagnosis and confidence.
 
 - Cases: 10 | Passed: 10 | Failed: 0
-- Category accuracy: 100.0%
+- Category accuracy: 100.0% (95% CI 72%-100%, n=10; hand-written, not evidence of real-world accuracy)
 - Mean confidence (known categories): 0.8
 
 | ID | Expected | Got | Confidence | Cited | Mock obs | Tool error | Result |

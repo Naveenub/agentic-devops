@@ -152,6 +152,10 @@
   "summary": {
     "cases": 10,
     "category_accuracy": 1.0,
+    "category_accuracy_ci95": [
+      0.722,
+      1.0
+    ],
     "failed": 0,
     "mean_confidence_known": 0.8,
     "passed": 10

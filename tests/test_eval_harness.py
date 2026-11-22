@@ -144,3 +144,37 @@ def test_live_is_skipped_without_an_llm(monkeypatch, capsys):
     monkeypatch.setenv("AGENT_LLM", "off")
     assert ev.main(["--live"]) == 0
     assert "SKIP --live" in capsys.readouterr().out
+
+
+# --- eval size / honesty -----------------------------------------------------------------------
+
+def test_wilson_interval_is_wide_for_tiny_n_and_tightens_with_n():
+    lo, hi = ev.wilson(2, 2)
+    assert lo < 0.4 and hi == 1.0            # "2/2" proves almost nothing
+    lo2, hi2 = ev.wilson(200, 200)
+    assert lo2 > 0.97 and ev.wilson(0, 0) == (0.0, 1.0)
+
+
+def test_golden_set_is_not_tiny_and_has_hard_negatives():
+    cases = ev.load_cases(include_real=False)
+    by_cat = {}
+    for c in cases:
+        by_cat.setdefault(c["expected_category"], []).append(c)
+    assert len(cases) >= 30
+    for cat in ("oom_killed", "iam_denied", "credentials_expired", "image_pull", "state_lock"):
+        assert len(by_cat[cat]) >= 2, cat
+    assert len(by_cat["unknown"]) >= 8        # abstention is where false positives show
+
+
+def test_known_gap_is_a_miss_that_does_not_fail_ci_but_xpass_does(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "eval"
+    (d / "real").mkdir(parents=True)
+    bad = {"id": "G1", "query": "q", "expected_category": "iam_denied",
+           "observations": [{"source": "k", "content": "exit code 137"}], "known_gap": "demo"}
+    (d / "golden_incidents.json").write_text(json.dumps([bad]))
+    (d / "expected_outputs.json").write_text((ev.EVAL_DIR / "expected_outputs.json").read_text())
+    monkeypatch.setattr(ev, "EVAL_DIR", d)
+    assert ev.main([]) == 0 and "XFAIL" in capsys.readouterr().out
+    ok = {**bad, "expected_category": "oom_killed", "expected_sources": ["data/runbooks/eks-oomkill.md"]}
+    (d / "golden_incidents.json").write_text(json.dumps([ok]))
+    assert ev.main([]) == 1 and "XPASS" in capsys.readouterr().out
