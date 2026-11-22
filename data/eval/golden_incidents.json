@@ -351,6 +351,7 @@
   },
   {
     "id": "GOLD-021",
+    "min_confidence": 0.5,
     "query": "s3 sync in the release job broke overnight",
     "observations": [
       {

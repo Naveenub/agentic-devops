@@ -31,7 +31,7 @@ def test_llm_diagnoses_unknown_signature_with_verified_evidence():
     r = run_agent({"question": "why exiting?", "observations": OBS})
     assert r["category"] == "other_llm" and r["diagnosis_source"] == "llm"
     assert "log: FATAL: too many open files" in r["evidence"]
-    assert r["confidence"] == 0.4
+    assert 0.0 < r["confidence"] <= 0.4  # graded, but LLM-only never exceeds the cap
 
 
 def test_fabricated_evidence_is_rejected():
@@ -49,12 +49,13 @@ def test_denied_commands_are_filtered():
 
 
 def test_signature_category_kept_and_llm_adds_reasoning():
+    plain = run_agent({"question": "payments-api crashing", "observations": OOM})
     llm.set_client(_fake({"diagnosis": "JVM heap exhausted; container killed.",
                           "evidence": ["Container terminated with exit code 137"], "suggestions": []}))
     r = run_agent({"question": "payments-api crashing", "observations": OOM})
     assert r["category"] == "oom_killed" and r["diagnosis_source"] == "signature+llm"
     assert r["diagnosis"] == "JVM heap exhausted; container killed."
-    assert r["confidence"] == 0.8
+    assert r["confidence"] > plain["confidence"]  # a verified LLM quote adds support, not a fixed 0.8
 
 
 def test_cannot_determine_and_garbage_fall_back():

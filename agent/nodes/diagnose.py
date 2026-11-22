@@ -115,6 +115,7 @@ def diagnose(state: AgentState) -> dict:
     use_llm = bool(obs) and llm.enabled()
     hits = retrieve(build_query(state), n=3) if (category != UNKNOWN or use_llm) else []
     rag_sources = [h.source for h in hits]
+    rag_scores = [h.score for h in hits]
     corroborating = CORROBORATING.get(category, set())
     evidence += [f"retrieved: {s}" for s in rag_sources if os.path.basename(s) in corroborating]
 
@@ -124,6 +125,7 @@ def diagnose(state: AgentState) -> dict:
         "diagnosis_source": "signature" if category != UNKNOWN else "none",
         "evidence": evidence,
         "rag_sources": rag_sources,
+        "rag_scores": rag_scores,
         "llm_suggestions": [],
     }
 

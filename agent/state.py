@@ -26,6 +26,7 @@ class AgentState(TypedDict, total=False):
     evidence: List[str]
     terraform: dict           # parse_error() result; only set when it agrees with the category
     rag_sources: List[str]
+    rag_scores: List[float]   # retrieval scores, parallel to rag_sources
     llm_suggestions: List[str]
     # suggest
     suggestions: List[str]

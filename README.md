@@ -276,7 +276,7 @@ if the weighted unsupported ratio exceeds `max_unsupported_ratio` or any specifi
 (`max_unsupported_specifics`). `--judge` adds an LLM per-claim entailment check for paraphrase.
 Still heuristic offline: a claim built only from supported words can be wrong (e.g. negation).
 
-Confidence scoring: signature match + corroborating runbook/incident; LLM-only verdicts are capped at 0.4.
+Confidence scoring (`agent/confidence.py`) is graded, not fixed: signature strength (matching lines, independent observations, Terraform parse), retrieval corroboration weighted by rank and score, verified LLM quotes, minus a penalty for conflicting signatures; cost anomalies scale with the z-score. LLM-only verdicts are capped at 0.4 and nothing exceeds 0.95. It is a deterministic heuristic, not a calibrated probability: tune the weights against `data/eval/real` cases.
 
 ---
 

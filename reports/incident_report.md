@@ -4,20 +4,20 @@ Dataset: `data/synthetic/incidents.json` - synthetic, not real telemetry. Mock a
 
 - Cases: 10 | Passed: 10 | Failed: 0
 - Category accuracy: 100.0% (95% CI 72%-100%, n=10; hand-written, not evidence of real-world accuracy)
-- Mean confidence (known categories): 0.8
+- Mean confidence (known categories): 0.744
 
 | ID | Expected | Got | Confidence | Cited | Mock obs | Tool error | Result |
 |---|---|---|---|---|---|---|---|
-| SYN-001 | oom_killed | oom_killed | 0.80 | yes | no | no | PASS |
-| SYN-002 | oom_killed | oom_killed | 0.80 | yes | no | no | PASS |
+| SYN-001 | oom_killed | oom_killed | 0.74 | yes | no | no | PASS |
+| SYN-002 | oom_killed | oom_killed | 0.74 | yes | no | no | PASS |
 | SYN-003 | iam_denied | iam_denied | 0.80 | yes | no | no | PASS |
-| SYN-004 | credentials_expired | credentials_expired | 0.80 | yes | no | no | PASS |
-| SYN-005 | image_pull | image_pull | 0.80 | yes | no | no | PASS |
+| SYN-004 | credentials_expired | credentials_expired | 0.79 | yes | no | no | PASS |
+| SYN-005 | image_pull | image_pull | 0.74 | yes | no | no | PASS |
 | SYN-006 | unknown | unknown | 0.00 | no | no | no | PASS |
 | SYN-007 | unknown | unknown | 0.00 | no | no | yes | PASS |
 | SYN-008 | iam_denied | iam_denied | 0.80 | yes | no | no | PASS |
-| SYN-009 | state_lock | state_lock | 0.80 | yes | no | no | PASS |
-| SYN-010 | credentials_expired | credentials_expired | 0.80 | yes | no | no | PASS |
+| SYN-009 | state_lock | state_lock | 0.75 | yes | no | no | PASS |
+| SYN-010 | credentials_expired | credentials_expired | 0.59 | yes | no | no | PASS |
 
 ## Evidence
 

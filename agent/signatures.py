@@ -102,3 +102,14 @@ def classify(text: str) -> Tuple[str, Optional[str]]:
             if pattern.search(line) and _is_evidence(category, line):
                 return category, line.strip()
     return UNKNOWN, None
+
+
+def signature_matches(text: str) -> dict:
+    """{category: [matching evidence lines]} for every regex signature, not just the first one.
+    Used by confidence to count support and to detect conflicting signatures."""
+    out = {}
+    for category, pattern in SIGNATURES:
+        lines = [l.strip() for l in text.splitlines() if pattern.search(l) and _is_evidence(category, l)]
+        if lines:
+            out[category] = lines
+    return out
