@@ -231,6 +231,17 @@ policy:
 
 ---
 
+## 🧠 LLM Diagnosis
+
+Enabled when `OPENAI_API_KEY` is set (or `OPENAI_BASE_URL` for a local OpenAI-compatible server, e.g. LLaMA). `AGENT_LLM=off` disables it; `AGENT_LLM_MODEL` selects the model (default `gpt-4o-mini`).
+
+* Regex signatures run first and set the category when they match; the LLM then writes the diagnosis and suggestions from real observations plus retrieved runbooks/incidents.
+* With no signature match, the LLM may propose a diagnosis (`category: other_llm`, confidence capped at 0.4).
+* **Guardrails:** the verdict is rejected unless every accepted evidence quote appears verbatim in a real observation; mock/errored observations are never sent; suggestions containing mutating commands (`kubectl apply/delete/patch/exec`, `terraform apply/destroy`, force flags) are dropped; any LLM failure falls back to the deterministic path.
+* Without a key the agent is purely signature + retrieval based.
+
+---
+
 🧪 Evaluation & Safety
 Hallucination Detection
 

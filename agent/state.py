@@ -1,5 +1,7 @@
 from typing import List, TypedDict
 
+LLM_CATEGORY = "other_llm"  # category for a diagnosis proposed by the LLM with no regex signature
+
 
 class Observation(TypedDict, total=False):
     source: str      # e.g. "kubectl logs", "github actions"
@@ -16,10 +18,12 @@ class AgentState(TypedDict, total=False):
     # observe
     observations: List[Observation]
     # diagnose
-    category: str             # see agent.signatures; "unknown" if no signature matched
+    category: str             # see agent.signatures; LLM_CATEGORY or "unknown" otherwise
     diagnosis: str
+    diagnosis_source: str     # "signature" | "signature+llm" | "llm" | "none"
     evidence: List[str]
     rag_sources: List[str]
+    llm_suggestions: List[str]
     # suggest
     suggestions: List[str]
     confidence: float
