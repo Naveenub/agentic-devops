@@ -523,6 +523,8 @@ PRs welcome. Ideas especially encouraged around:
 * Better prompts
 * Additional integrations
 
+Contributions to the open core are accepted under Apache-2.0. Changes to `product/` (commercial layer) require signing the [CLA](CLA.md) first; see [LICENSING.md](LICENSING.md).
+
 ---
 
 ## 📄 License

@@ -1,14 +1,70 @@
-DevOps AI Agent — Commercial Product Layer
+DevOps AI Agent — Commercial Product Layer License
+Version 0.1 (DRAFT — pending counsel review; see "Status" at the end)
 
-Copyright (c) 2026 the copyright holder of this repository. All rights reserved.
+Copyright (c) 2026 [LICENSOR LEGAL NAME]. All rights reserved.
 
-This directory (product/) is NOT covered by the Apache License 2.0 that applies to the rest of
-this repository. You may read it and run it for evaluation and non-production testing. Running it
-in production, offering it to third parties as a hosted service, or redistributing it requires a
-commercial license from the copyright holder.
+"Licensor" means [LICENSOR LEGAL NAME], [jurisdiction/entity type], contact: [LEGAL CONTACT EMAIL].
+"Software" means every file in this directory (product/), tests/test_product.py and
+Dockerfile.product, and any copy or derivative of them. Everything else in this repository is
+licensed under the Apache License 2.0 (see the top-level LICENSE) and is not affected by this file.
 
-Everything outside product/ (agent/, api/, ui/, data/, tests other than tests/test_product.py, docs)
-remains Apache-2.0 under the top-level LICENSE and works without this directory.
+1. Evaluation licence (free)
+   Licensor grants you a non-exclusive, non-transferable, revocable licence to read, build and run
+   the Software, and to modify it for your own internal use, solely for evaluation, development and
+   non-production testing.
 
-TEMPLATE NOTICE: this text is a placeholder describing the intended split. Have counsel replace it
-with final commercial terms (and decide on a contributor agreement/CLA) before publishing.
+2. Production and commercial use (requires a paid licence)
+   Without a separate written commercial licence signed by Licensor, you may NOT:
+   (a) run the Software in production, or with real customer, tenant or billing data;
+   (b) offer the Software, or functionality substantially derived from it, to third parties as a
+       hosted, managed or software-as-a-service offering;
+   (c) copy, distribute, sublicense, sell, rent or otherwise make the Software available to others,
+       in source or object form, whether modified or not;
+   (d) remove or alter copyright, licence or attribution notices;
+   (e) circumvent or disable plan limits, metering, billing or licence-related checks.
+
+3. Open core unaffected
+   Nothing in this file restricts your rights under the Apache License 2.0 in the code outside the
+   Software. The open core works without the Software; you may not use this licence's terms to
+   restrict it, and Licensor does not use Apache-2.0 terms to grant rights in the Software.
+
+4. Contributions
+   Contributions to the Software are accepted only under the Contributor License Agreement in
+   CLA.md. Contributions to the open core are accepted under Apache-2.0 (Section 5 of that licence).
+
+5. Ownership
+   The Software is licensed, not sold. Licensor and its licensors retain all right, title and
+   interest, including all intellectual property rights. Rights not expressly granted are reserved.
+   Feedback you give about the Software may be used by Licensor without restriction or obligation.
+
+6. Third-party components
+   The Software may depend on third-party components under their own licences (see
+   product/requirements.txt). Those licences govern those components.
+
+7. Termination
+   This licence ends automatically if you breach it. On termination you must stop using the
+   Software and delete all copies. Sections 2, 5 and 7 to 10 survive.
+
+8. No warranty
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT.
+
+9. Limitation of liability
+   TO THE MAXIMUM EXTENT PERMITTED BY LAW, LICENSOR IS NOT LIABLE FOR ANY INDIRECT, INCIDENTAL,
+   SPECIAL, CONSEQUENTIAL OR PUNITIVE DAMAGES, OR LOSS OF PROFITS, DATA OR GOODWILL, ARISING OUT OF
+   THIS LICENCE OR THE SOFTWARE. LICENSOR'S TOTAL LIABILITY UNDER THIS LICENCE IS LIMITED TO
+   [USD 100] [counsel to confirm].
+
+10. General
+   Governing law: [GOVERNING LAW]. Venue: [COURTS/ARBITRATION]. If any provision is unenforceable,
+   the rest remains in effect. A commercial licence, if signed, prevails over this file.
+
+Commercial licensing: [LEGAL/SALES CONTACT EMAIL OR URL]
+
+Status
+This text replaces the earlier one-paragraph placeholder with usable terms, but it was drafted
+without legal review and is NOT final. Before this repository (or product/) is published or
+licensed to anyone, counsel must: fill every [BRACKETED] field, confirm the evaluation/production
+boundary, liability cap, governing law and export/sanctions language, and decide whether a
+standalone commercial licence agreement (pricing, support, audit rights, term) is needed.
+Then delete this Status section and the "DRAFT" marker.
