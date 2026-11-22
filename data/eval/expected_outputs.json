@@ -1,5 +1,6 @@
 {
   "confidence_min": 0.6,
   "must_cite": true,
-  "max_unsupported_ratio": 0.5
+  "max_unsupported_ratio": 0.5,
+  "max_unsupported_specifics": 0
 }

@@ -1,48 +1,59 @@
-"""Unsupported-token ratio: share of the answer's words found in neither the retrieved
-context nor the observations. Crude lexical metric, not a semantic groundedness check.
+"""Groundedness of each diagnosis against the retrieved context + observations.
 
-  python -m agent.hallucination_eval
+  python -m agent.hallucination_eval            # offline: weighted lexical + specifics check
+  python -m agent.hallucination_eval --judge    # also LLM per-claim entailment (needs an LLM)
+
+A case fails if its weighted unsupported score exceeds `max_unsupported_ratio` OR it contains more
+than `max_unsupported_specifics` specifics (numbers, ARNs, identifiers) absent from the context.
+Details and limits: agent/groundedness.py. Cases with no diagnosis (abstentions) are skipped.
 """
 import json
-import re
 import sys
-from pathlib import Path
 
-from agent.eval import EVAL_DIR
+from agent import llm
+from agent.eval import EVAL_DIR, load_cases, run_case_agent
+from agent.groundedness import check
 from agent.memory.retrieval import retrieve
 from agent.nodes.diagnose import build_query
-from agent.orchestrator import run_agent
 
-_WORD = re.compile(r"[a-z]+")
-_STOP = {"the", "a", "an", "to", "of", "and", "or", "is", "was", "are", "were", "in", "on", "for",
-         "due", "by", "it", "its", "that", "this", "with", "be", "as", "at", "no"}
+
+def hallucination_report(answer: str, query: str, extra_context: str = "", judge: bool = False) -> dict:
+    """`query` is the retrieval query; `answer` should be the claim text (the diagnosis)."""
+    context = " ".join([h.text for h in retrieve(query, n=3)] + [extra_context])
+    return check(answer, context, judge=judge)
 
 
 def hallucination_score(answer: str, query: str, extra_context: str = "") -> float:
-    """`query` is the retrieval query; `answer` should be the claim text (the diagnosis)."""
-    context = " ".join([h.text for h in retrieve(query, n=3)] + [extra_context]).lower()
-    support = set(_WORD.findall(context))
-    answer_words = [w for w in _WORD.findall(answer.lower()) if w not in _STOP]
-    if not answer_words:
-        return 0.0
-    unsupported = [w for w in answer_words if w not in support]
-    return round(len(unsupported) / len(answer_words), 3)
+    return hallucination_report(answer, query, extra_context)["score"]
 
 
-def main() -> int:
-    cases = json.loads((EVAL_DIR / "golden_incidents.json").read_text(encoding="utf-8"))
-    limit = json.loads((EVAL_DIR / "expected_outputs.json").read_text(encoding="utf-8"))["max_unsupported_ratio"]
-    status = 0
-    for c in cases:
+def main(argv=()) -> int:
+    judge = "--judge" in argv
+    limits = json.loads((EVAL_DIR / "expected_outputs.json").read_text(encoding="utf-8"))
+    max_ratio, max_specifics = limits["max_unsupported_ratio"], limits.get("max_unsupported_specifics", 0)
+    if judge and not llm.enabled():
+        print("SKIP --judge: no LLM configured; running without it")
+        judge = False
+    status = scored = 0
+    for c in load_cases():
         obs = c.get("observations", [])
-        state = {"question": c["query"], "observations": obs}
-        claim = run_agent(state)["diagnosis"]  # templated suggestion text is not a claim
-        score = hallucination_score(claim, build_query(state), " ".join(o["content"] for o in obs))
-        ok = score <= limit
+        result = run_case_agent(c)
+        if result["diagnosis_source"] == "none":  # abstention text is not a claim
+            print(f"{c['id']}: SKIP (abstained)")
+            continue
+        rep = hallucination_report(result["diagnosis"], build_query({"question": c["query"], "observations": obs}),
+                                   " ".join(o["content"] for o in obs), judge=judge)
+        bad_judge = rep["judge_unsupported_claims"] or []
+        ok = rep["score"] <= max_ratio and len(rep["unsupported_specifics"]) <= max_specifics and not bad_judge
         status |= 0 if ok else 1
-        print(f"{c['id']}: unsupported={score} limit={limit} {'PASS' if ok else 'FAIL'}")
+        scored += 1
+        extra = f" specifics={rep['unsupported_specifics']}" if rep["unsupported_specifics"] else ""
+        extra += f" judge_unsupported={bad_judge}" if bad_judge else ""
+        print(f"{c['id']}: unsupported={rep['score']} limit={max_ratio} {'PASS' if ok else 'FAIL'}"
+              f" source={result['diagnosis_source']}{extra}")
+    print(f"scored {scored} diagnoses" + (" (with LLM judge)" if judge else " (lexical + specifics only)"))
     return status
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

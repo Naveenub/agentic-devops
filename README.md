@@ -242,18 +242,30 @@ Enabled when `OPENAI_API_KEY` is set (or `OPENAI_BASE_URL` for a local OpenAI-co
 
 ---
 
-🧪 Evaluation & Safety
-Hallucination Detection
+## 🧪 Evaluation & Safety
 
-Measures unsupported tokens vs retrieved context
+```bash
+make eval        # offline, deterministic (runs in CI): golden set + groundedness
+make live-eval   # real LLM (needs OPENAI_API_KEY / OPENAI_BASE_URL): LLM accuracy + LLM judge
+```
 
-Fails CI if hallucination score exceeds threshold
+**Golden set** (`data/eval/golden_incidents.json`): hand-written cases covering every signature category,
+noisy logs, a misleading question, mock-only observations (must abstain), a prompt injection in a log,
+and LLM-path cases. Offline runs stub the LLM from each case's `llm_fixture`, so they test the pipeline and
+its guardrails (verbatim-evidence check, mutating-command filter, confidence cap), **not LLM accuracy**.
 
-Confidence Scoring
+**Real-incident set** (`data/eval/real/`, schema in its README): the only place LLM accuracy is measured.
+The eval reports golden and real counts separately, warns while there are 0 real cases, rejects real cases
+that leak into the knowledge base, and `--min-real N` can gate CI on having enough of them.
 
-Based on retrieval depth + agreement between agents
+**Hallucination / groundedness** (`agent/groundedness.py`): the diagnosis is checked against retrieved
+context + observations. Words are stemmed; *specifics* (numbers/units like `2048Mi`, ARNs, `iam:PassRole`,
+identifiers) weigh 3x and must appear verbatim, since a fabricated value is the dangerous failure. CI fails
+if the weighted unsupported ratio exceeds `max_unsupported_ratio` or any specific is unsupported
+(`max_unsupported_specifics`). `--judge` adds an LLM per-claim entailment check for paraphrase.
+Still heuristic offline: a claim built only from supported words can be wrong (e.g. negation).
 
-Low confidence → PagerDuty escalation
+Confidence scoring: signature match + corroborating runbook/incident; LLM-only verdicts are capped at 0.4.
 
 ---
 
