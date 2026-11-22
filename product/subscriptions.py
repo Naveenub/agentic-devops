@@ -8,8 +8,9 @@ Plain httpx against the Stripe REST API (same style as billing.py); no SDK.
   STRIPE_SUCCESS_URL / STRIPE_CANCEL_URL / STRIPE_PORTAL_RETURN_URL   where Stripe sends the customer back
 
 Lifecycle policy: a subscription that is active/trialing puts the tenant on the plan its price maps to.
-past_due keeps the plan while Stripe retries the card (dunning). canceled, unpaid, incomplete_expired
-(or a failed invoice with no retry left) drops the tenant to `free`; the tenant stays active."""
+the first failed payment (invoice.payment_failed, or status past_due) drops the tenant to `free` at once but
+keeps the subscription id, so Stripe's retries continue and a successful retry restores the paid plan.
+canceled, unpaid and incomplete_expired also drop to `free` and clear the subscription. The tenant stays active."""
 import hashlib
 import hmac
 import json
@@ -160,9 +161,10 @@ def _apply_subscription(sub: dict) -> None:
         store.update_tenant(t["id"], **fields)
     elif status in DEAD:
         _downgrade(t, status)
-    else:  # past_due, incomplete, paused: keep the current plan, record why
-        store.update_tenant(t["id"], stripe_subscription_id=sid, subscription_status=status,
-                            stripe_customer_id=sub.get("customer"))
+    else:  # past_due, incomplete, paused: record why; a failing payment loses the paid plan immediately
+        if status == "past_due":
+            fields["plan"] = FALLBACK_PLAN
+        store.update_tenant(t["id"], stripe_subscription_id=sid, subscription_status=status, **fields)
 
 
 def _downgrade(t: dict, status: str) -> None:
@@ -201,8 +203,8 @@ def handle_event(event: dict) -> str:
         if t and obj.get("subscription") in (None, t.get("stripe_subscription_id")):
             if obj.get("next_payment_attempt") is None:  # Stripe has given up retrying
                 _downgrade(t, "unpaid")
-            else:
-                store.update_tenant(t["id"], subscription_status="past_due")
+            else:  # downgrade now, keep the subscription: a successful retry re-upgrades via subscription.updated
+                store.update_tenant(t["id"], plan=FALLBACK_PLAN, subscription_status="past_due")
         result = "handled"
     else:
         return "ignored"

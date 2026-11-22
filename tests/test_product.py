@@ -336,7 +336,7 @@ def test_subscription_upgrades_then_cancellation_downgrades(stripe_env):
     assert (got["plan"], got["active"], got["stripe_subscription_id"], got["subscription_status"]) == ("free", 1, None, "canceled")
 
 
-def test_failed_payment_keeps_plan_while_retrying_then_downgrades(stripe_env):
+def test_failed_payment_downgrades_immediately_and_retry_success_restores(stripe_env):
     c, mp, *_ = stripe_env
     t = _tenant(c)
     store.update_tenant(t["id"], stripe_customer_id="cus_1")
@@ -345,7 +345,11 @@ def test_failed_payment_keeps_plan_while_retrying_then_downgrades(stripe_env):
                           "data": {"object": {"customer": "cus_1", "subscription": "sub_1", "next_payment_attempt": nxt}}}
     _hook(c, inv(1900000000, 1))
     got = store.get_tenant(t["id"])
-    assert (got["plan"], got["subscription_status"]) == ("pro", "past_due")
+    assert (got["plan"], got["subscription_status"], got["stripe_subscription_id"]) == ("free", "past_due", "sub_1")
+    _hook(c, _sub(t["id"], "cus_1"))  # Stripe retry succeeds
+    assert store.get_tenant(t["id"])["plan"] == "pro"
+    _hook(c, _sub(t["id"], "cus_1", status="past_due"))  # status alone also downgrades
+    assert store.get_tenant(t["id"])["plan"] == "free"
     _hook(c, inv(None, 2))  # retries exhausted
     got = store.get_tenant(t["id"])
     assert (got["plan"], got["subscription_status"]) == ("free", "unpaid")
