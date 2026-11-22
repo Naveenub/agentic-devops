@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 
 from agent.cost_watch import check_cost, parse_watch, watch_forever
 from agent.graph import build_graph
@@ -30,13 +30,22 @@ router = APIRouter()
 graph = build_graph()
 
 
+def require_api_key(x_api_key: str | None = Header(None)) -> None:
+    """Shared-secret guard for /analyze and /cost/check. Fails closed when AGENT_API_KEY is unset."""
+    key = os.getenv("AGENT_API_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail="AGENT_API_KEY is not configured")
+    if not hmac.compare_digest((x_api_key or "").encode(), key.encode()):
+        raise HTTPException(status_code=401, detail="invalid API key")
+
+
 def _run(question: str, extra: dict | None = None) -> dict:
     state = {"question": question}
     state.update({k: v for k, v in (extra or {}).items() if k in ("kubernetes", "github", "cost")})
     return graph.invoke(state)
 
 
-@app.post("/analyze")
+@app.post("/analyze", dependencies=[Depends(require_api_key)])
 def analyze(payload: dict):
     question = payload.get("question") or payload.get("query")
     if not question:
@@ -52,7 +61,7 @@ def analyze(payload: dict):
     }
 
 
-@app.post("/cost/check")
+@app.post("/cost/check", dependencies=[Depends(require_api_key)])
 def cost_check(payload: dict):
     """Run the agent on one service/region's daily spend; alert on a z-score spike.
     Alert targets come from SLACK_ALERT_CHANNEL / PAGERDUTY_ROUTING_KEY only, never the request."""

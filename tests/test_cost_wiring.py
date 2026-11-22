@@ -47,7 +47,8 @@ def api(monkeypatch):
     monkeypatch.setattr(slack, "send_message", lambda ch, text: sent.append((ch, text)))
     monkeypatch.setenv("SLACK_ALERT_CHANNEL", "C123")
     monkeypatch.setenv("SLACK_SIGNING_SECRET", "s3cret")
-    return TestClient(app), sent, monkeypatch
+    monkeypatch.setenv("AGENT_API_KEY", "k3y")
+    return TestClient(app, headers={"x-api-key": "k3y"}), sent, monkeypatch
 
 
 def _slack_post(client, body, secret="s3cret", ts=None, sig=None):
@@ -167,6 +168,17 @@ def test_slack_command_still_diagnoses_other_text(api):
     client, sent, _ = api
     _slack_post(client, {"text": "pod exit code 137", "channel_id": "C9"})
     assert "*Diagnosis:*" in sent[0][1]
+
+
+def test_api_key_required_on_analyze_and_cost_check(api):
+    client, sent, mp = api
+    bare = TestClient(client.app)
+    for path, body in (("/analyze", {"question": "q"}), ("/cost/check", {"service": "EC2", "region": "r"})):
+        assert bare.post(path, json=body).status_code == 401
+        assert bare.post(path, json=body, headers={"x-api-key": "wrong"}).status_code == 401
+    mp.delenv("AGENT_API_KEY")
+    assert client.post("/analyze", json={"question": "q"}).status_code == 503  # fails closed
+    assert sent == []
 
 
 def test_slack_command_rejects_bad_signature_stale_ts_and_missing_secret(api):
