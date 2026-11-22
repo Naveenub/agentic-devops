@@ -55,6 +55,22 @@ def revoke(tid: str, prefix: str):
     return {"revoked": store.revoke_key(prefix, tid)}
 
 
+@admin.put("/tenants/{tid}/slack")
+def link_slack(tid: str, payload: dict):
+    team_id = payload.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=422, detail="'team_id' is required")
+    if not store.get_tenant(tid):
+        raise HTTPException(status_code=404, detail="no such tenant")
+    store.link_slack(tid, team_id)
+    return {"tenant": tid, "team_id": team_id}
+
+
+@admin.delete("/tenants/{tid}/slack/{team_id}")
+def unlink_slack(tid: str, team_id: str):
+    return {"unlinked": store.unlink_slack(tid, team_id)}
+
+
 @admin.get("/usage/{tid}")
 def tenant_usage(tid: str):
     t = store.get_tenant(tid)

@@ -1,28 +1,13 @@
 """Quota + rate-limit enforcement and usage recording."""
-import threading
-import time
-from collections import defaultdict, deque
-
 from fastapi import HTTPException
 
 from product import store
 from product.plans import get_plan
 
-_hits: dict = defaultdict(deque)
-_lock = threading.Lock()
-
-
 def check_rate(tenant: dict) -> None:
-    """Sliding 60s window per tenant, in-process (run one worker, or front with a shared limiter)."""
-    limit = get_plan(tenant["plan"]).rate_per_minute
-    now = time.monotonic()
-    with _lock:
-        q = _hits[tenant["id"]]
-        while q and now - q[0] > 60:
-            q.popleft()
-        if len(q) >= limit:
-            raise HTTPException(status_code=429, detail="rate limit exceeded", headers={"Retry-After": "60"})
-        q.append(now)
+    """Sliding 60s window per tenant, kept in the product DB so it holds across workers and restarts."""
+    if not store.rate_hit(tenant["id"], get_plan(tenant["plan"]).rate_per_minute):
+        raise HTTPException(status_code=429, detail="rate limit exceeded", headers={"Retry-After": "60"})
 
 
 def check_quota(tenant: dict, event: str) -> None:

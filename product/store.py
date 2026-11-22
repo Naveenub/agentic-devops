@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS usage (
   id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, event TEXT NOT NULL,
   quantity INTEGER NOT NULL, ts REAL NOT NULL, reported INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS usage_tenant_ts ON usage(tenant_id, ts);
+CREATE TABLE IF NOT EXISTS rate_hits (tenant_id TEXT NOT NULL, ts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS rate_hits_tenant_ts ON rate_hits(tenant_id, ts);
+CREATE TABLE IF NOT EXISTS slack_links (team_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id));
 """
 
 
@@ -27,11 +30,14 @@ def db_path() -> str:
 
 
 @contextmanager
-def conn():
+def conn(immediate: bool = False):
+    """immediate=True takes the write lock up front, so read-then-write sequences are atomic across processes."""
     c = sqlite3.connect(db_path(), timeout=10)
     c.row_factory = sqlite3.Row
     try:
         c.executescript(SCHEMA)
+        if immediate:
+            c.execute("BEGIN IMMEDIATE")
         yield c
         c.commit()
     finally:
@@ -107,3 +113,35 @@ def usage_since(tid: str, since: float) -> dict:
         rows = c.execute("SELECT event, SUM(quantity) q FROM usage WHERE tenant_id=? AND ts>=? GROUP BY event",
                          (tid, since)).fetchall()
     return {r["event"]: r["q"] for r in rows}
+
+
+def rate_hit(tid: str, limit: int, window: float = 60.0) -> bool:
+    """Sliding-window limiter shared by every worker/process on this DB. Records the hit and returns True
+    if under `limit` requests in the last `window` seconds; a refused request is not recorded."""
+    now = time.time()
+    with conn(immediate=True) as c:
+        c.execute("DELETE FROM rate_hits WHERE tenant_id=? AND ts<=?", (tid, now - window))
+        if c.execute("SELECT COUNT(*) FROM rate_hits WHERE tenant_id=?", (tid,)).fetchone()[0] >= limit:
+            return False
+        c.execute("INSERT INTO rate_hits(tenant_id,ts) VALUES(?,?)", (tid, now))
+        return True
+
+
+def link_slack(tid: str, team_id: str) -> None:
+    """Map a Slack workspace (the slash command's team_id) to a tenant; re-linking moves it."""
+    with conn() as c:
+        c.execute("INSERT OR REPLACE INTO slack_links(team_id,tenant_id) VALUES(?,?)", (team_id, tid))
+
+
+def unlink_slack(tid: str, team_id: str) -> int:
+    with conn() as c:
+        return c.execute("DELETE FROM slack_links WHERE team_id=? AND tenant_id=?", (team_id, tid)).rowcount
+
+
+def tenant_for_slack(team_id: str | None) -> dict | None:
+    if not team_id:
+        return None
+    with conn() as c:
+        r = c.execute("SELECT t.* FROM slack_links l JOIN tenants t ON t.id=l.tenant_id "
+                      "WHERE l.team_id=? AND t.active=1", (team_id,)).fetchone()
+    return dict(r) if r else None

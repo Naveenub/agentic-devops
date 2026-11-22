@@ -146,3 +146,69 @@ def test_stripe_report_is_idempotent_and_only_marks_successes(env):
     assert billing.report_usage(post=lambda d: (calls.append(d), R(200))[1]) == {"reported": 1, "failed": 0}
     assert billing.report_usage(post=lambda d: (calls.append(d), R(200))[1])["reported"] == 0  # nothing left
     assert calls[0]["payload[value]"] == "2" and calls[0]["identifier"] == calls[1]["identifier"]
+
+
+def test_rate_limit_is_shared_across_processes(env):
+    """The window lives in the DB, so a second worker (simulated by dropping in-process state) still sees it."""
+    c, mp = env
+    mp.setenv("PRODUCT_PLANS", '{"free": {"rate_per_minute": 2}}')
+    t = _tenant(c)
+    assert _ask(c, t["api_key"]).status_code == 200
+    import product.metering as m
+    assert not hasattr(m, "_hits")
+    assert [_ask(c, t["api_key"]).status_code for _ in range(2)] == [200, 429]
+    with store.conn() as db:  # rows age out: after the window the tenant may call again
+        db.execute("UPDATE rate_hits SET ts = ts - 61")
+    assert _ask(c, t["api_key"]).status_code == 200
+
+
+def _slack(c, mp, text, team="T1", channel="C1"):
+    import hashlib, hmac, time
+    from urllib.parse import urlencode
+    sent = []
+    mp.setenv("SLACK_SIGNING_SECRET", "s3")
+    import agent.tools.slack as sl
+    mp.setattr(sl, "send_message", lambda ch, msg: sent.append(msg))
+    body = urlencode({"text": text, "team_id": team, "channel_id": channel}).encode()
+    ts = str(int(time.time()))
+    sig = "v0=" + hmac.new(b"s3", b"v0:" + ts.encode() + b":" + body, hashlib.sha256).hexdigest()
+    r = c.post("/slack/command", content=body, headers={
+        "x-slack-request-timestamp": ts, "x-slack-signature": sig,
+        "content-type": "application/x-www-form-urlencoded"})
+    return r, sent
+
+
+def test_slack_requires_linked_workspace_and_is_metered(env):
+    c, mp = env
+    h = {"x-admin-key": "adm"}
+    r, sent = _slack(c, mp, "pod OOMKilled exit code 137")
+    assert r.json()["response_type"] == "ephemeral" and not sent  # unlinked workspace: refused
+    t = _tenant(c)
+    assert c.put(f"/admin/tenants/{t['id']}/slack", json={"team_id": "T1"}, headers=h).status_code == 200
+    r, sent = _slack(c, mp, "pod OOMKilled exit code 137")
+    assert r.json() == {"ok": True} and sent
+    r, _ = _slack(c, mp, "pod OOMKilled exit code 137", team="T2")  # a different workspace stays unlinked
+    assert r.json()["response_type"] == "ephemeral"
+    u = c.get("/usage", headers={"x-api-key": t["api_key"]}).json()["usage"]
+    assert u["analyze"]["used"] == 1
+
+
+def test_slack_enforces_quota_and_shared_tool_grant(env):
+    c, mp = env
+    h = {"x-admin-key": "adm"}
+    mp.setenv("PRODUCT_PLANS", '{"free": {"monthly_quota": {"analyze": 1}}}')
+    t = _tenant(c)
+    c.put(f"/admin/tenants/{t['id']}/slack", json={"team_id": "T1"}, headers=h)
+    assert _slack(c, mp, "q one")[0].json() == {"ok": True}
+    r, sent = _slack(c, mp, "q two")
+    assert "quota" in r.json()["text"] and not sent
+    r, _ = _slack(c, mp, "cost ec2 us-east-1")  # server's AWS creds need the shared_tools grant
+    assert r.json()["response_type"] == "ephemeral"
+    assert c.delete(f"/admin/tenants/{t['id']}/slack/T1", headers=h).json() == {"unlinked": 1}
+    assert "isn't linked" in _slack(c, mp, "q three")[0].json()["text"]
+
+
+def test_slack_unchanged_in_core_mode(monkeypatch):
+    monkeypatch.delenv("PRODUCT_DB", raising=False)
+    from api.main import _slack_tenant
+    assert _slack_tenant({"text": "x"}) == (None, None)

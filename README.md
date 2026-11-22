@@ -181,7 +181,9 @@ The open core runs single-tenant with one `AGENT_API_KEY`. Setting `PRODUCT_DB` 
 * **Billing:** `POST /admin/billing/report` sends unreported usage to Stripe Billing Meters (idempotent). Set each tenant's `stripe_customer_id` via `PATCH /admin/tenants/{id}`.
 * **Isolation:** inputs that use the server's own kubectl/GitHub/AWS credentials are refused for tenants unless their plan has `shared_tools`; tenants send `"logs": "..."` text instead.
 
-Not covered: SSO/SAML, a billing portal, and multi-worker rate limiting (the limiter is in-process). `/slack/command` stays operator-level (Slack signature), unmetered.
+Rate limits are stored in the product DB, so they hold across workers. `/slack/command` is metered too: link a workspace with `PUT /admin/tenants/{id}/slack {"team_id": "T…"}` (unlinked workspaces are refused); its rate limit, quota and shared-tool grant then apply as on the HTTP API (`cost …` needs `shared_tools`).
+
+Not covered: SSO/SAML and a billing portal.
 
 ---
 

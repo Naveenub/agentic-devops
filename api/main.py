@@ -151,9 +151,36 @@ def _verify_slack(raw: bytes, ts: str | None, sig: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid Slack signature")
 
 
-def _handle_slack(payload: dict) -> None:
+def _slack_event(payload: dict) -> str:
+    tokens = (payload.get("text") or "").split()
+    return "cost_check" if tokens and tokens[0].lower() == "cost" else "analyze"
+
+
+def _slack_tenant(payload: dict) -> tuple[dict | None, str | None]:
+    """Product mode: the workspace must be linked to a tenant (PUT /admin/tenants/{id}/slack), and that
+    tenant's rate limit, quota and shared-tool grant apply as on the HTTP API. Returns (tenant, refusal)."""
+    if not product_enabled():
+        return None, None
+    from product import metering, store
+
+    tenant = store.tenant_for_slack(payload.get("team_id"))
+    if not tenant:
+        return None, "This Slack workspace isn't linked to an account."
+    event = _slack_event(payload)
+    try:
+        metering.check_rate(tenant)
+        metering.check_quota(tenant, event)
+        if event == "cost_check":  # reads the operator's AWS account
+            _gate_shared_tools(tenant, {"cost": True})
+    except HTTPException as e:
+        return None, str(e.detail)
+    return tenant, None
+
+
+def _handle_slack(payload: dict, tenant: dict | None = None) -> None:
     """Runs after the 200 ack (Slack gives 3s) and in a worker thread, so the agent/AWS calls
-    neither time the command out nor block the event loop."""
+    neither time the command out nor block the event loop. A tenant means usage is metered."""
+
     from agent.tools.slack import send_message  # lazy: slack_sdk only needed here
 
     channel = payload["channel_id"]
@@ -167,14 +194,28 @@ def _handle_slack(payload: dict) -> None:
                 a = r["cost_anomaly"]
                 send_message(channel, f"*Cost:* {a['message']}"
                              + (f"\n*Suggested:* {r['suggestions'][0]}" if a["anomaly"] else ""))
+                if tenant:
+                    from product.metering import record
+
+                    record(tenant, "cost_check")
             return
-        result = _run(payload["text"])
+        used: list = []
+        reset = llm.usage_sink.set(used)
+        try:
+            result = _run(payload["text"])
+        finally:
+            llm.usage_sink.reset(reset)
         send_message(
             channel,
             f"*Diagnosis:* {result['diagnosis']}\n"
             f"*Confidence:* {result['confidence']}\n"
             f"*Evidence:* {', '.join(result['evidence'])}",
         )
+        if tenant:
+            from product.metering import record
+
+            record(tenant, "analyze")
+            record(tenant, "llm_tokens", sum(used))
     except Exception:  # the ack already went out, so tell the channel instead of failing silently
         logging.getLogger(__name__).exception("slack command failed")
         send_message(channel, "Command failed; see server logs.")
@@ -190,7 +231,10 @@ async def slack_command(request: Request, background: BackgroundTasks):
     allowed = {c.strip() for c in os.getenv("SLACK_ALLOWED_CHANNELS", "").split(",") if c.strip()}
     if allowed and payload.get("channel_id") not in allowed:
         return {"response_type": "ephemeral", "text": "This command isn't enabled in this channel."}
-    background.add_task(_handle_slack, payload)
+    tenant, refusal = _slack_tenant(payload)
+    if refusal:
+        return {"response_type": "ephemeral", "text": refusal}
+    background.add_task(_handle_slack, payload, tenant)
     return {"ok": True}
 
 
