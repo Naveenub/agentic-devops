@@ -23,3 +23,29 @@ jobs:
 
       - name: Report is current (synthetic dataset)
         run: make report-check
+
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r product/requirements.txt
+
+      - name: Product tests on PostgreSQL
+        env:
+          TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: python -m pytest -q tests/test_product.py tests/test_product_scale.py tests/test_stripe_sync.py
