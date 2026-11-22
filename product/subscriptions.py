@@ -66,6 +66,11 @@ def prices_for(plan: str) -> list[tuple[str, bool]]:
     return out
 
 
+def purchasable(plan: str) -> bool:
+    """True when Stripe is configured and the plan has a Checkout price (never for `free`)."""
+    return plan != "free" and bool(os.getenv("STRIPE_SECRET_KEY")) and bool(prices_for(plan))
+
+
 def plan_for_prices(price_ids: list[str]) -> str | None:
     from product.plans import _load
     for name in _load():

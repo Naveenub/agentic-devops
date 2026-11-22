@@ -409,3 +409,119 @@ def test_old_database_is_migrated(tmp_path, monkeypatch):
         "INSERT INTO tenants VALUES('ten_1','a','pro','cus_1',1,0);")
     monkeypatch.setenv("PRODUCT_DB", str(db))
     assert store.get_tenant("ten_1")["subscription_status"] is None
+
+
+# ---- self-serve: pricing, signup, account/billing page ------------------------------------------
+
+def test_web_pages_hidden_in_core_mode(monkeypatch):
+    monkeypatch.delenv("PRODUCT_DB", raising=False)
+    c = TestClient(app)
+    for path in ("/pricing", "/signup", "/account", "/billing"):
+        assert c.get(path).status_code == 404
+    assert c.post("/signup", json={"name": "x"}).status_code == 404
+
+
+def test_signup_creates_free_tenant_and_working_key(env):
+    c, _ = env
+    r = c.post("/signup", json={"name": "  Acme   Corp "})
+    assert r.status_code == 200
+    t = r.json()
+    assert t["plan"] == "free" and t["name"] == "Acme Corp" and t["api_key"].startswith("adk_")
+    assert _ask(c, t["api_key"]).status_code == 200
+    assert c.get("/usage", headers={"x-api-key": t["api_key"]}).json()["plan"] == "free"
+    with store.conn() as db:  # plaintext key is never stored; no Stripe customer is made for anonymous signups
+        assert t["api_key"] not in str([tuple(x) for x in db.execute("SELECT * FROM api_keys")])
+        assert db.execute("SELECT stripe_customer_id FROM tenants WHERE id=?", (t["id"],)).fetchone()[0] is None
+
+
+def test_signup_ignores_requested_plan_and_validates(env):
+    c, _ = env
+    assert c.post("/signup", json={"name": "x", "plan": "enterprise"}).json()["plan"] == "free"
+    assert c.post("/signup", json={}).status_code == 422
+    assert c.post("/signup", json={"name": "   "}).status_code == 422
+    assert c.post("/signup", json={"name": 5}).status_code == 422
+    assert c.post("/signup", json={"name": "x" * 101}).status_code == 422
+
+
+def test_signup_rate_limited_per_ip_and_per_day(env):
+    c, mp = env
+    mp.setenv("PRODUCT_SIGNUP_PER_IP_HOUR", "2")
+    assert [c.post("/signup", json={"name": "a"}).status_code for _ in range(3)] == [200, 200, 429]
+    mp.setenv("PRODUCT_TRUST_PROXY", "1")  # a different (proxy-reported) client gets its own allowance
+    assert c.post("/signup", json={"name": "b"}, headers={"x-forwarded-for": "1.2.3.4"}).status_code == 200
+    mp.setenv("PRODUCT_SIGNUP_PER_DAY", "3")  # ...but the deployment-wide cap still applies
+    assert c.post("/signup", json={"name": "c"}, headers={"x-forwarded-for": "5.6.7.8"}).status_code == 429
+
+
+def test_signup_can_be_closed(env):
+    c, mp = env
+    mp.setenv("PRODUCT_SIGNUP", "off")
+    assert c.post("/signup", json={"name": "x"}).status_code == 403
+    assert "closed" in c.get("/signup").text
+    assert _tenant(c)["plan"] == "free"  # operators can still provision
+
+
+def test_pricing_page_lists_plans_and_only_offers_what_can_be_bought(stripe_env):
+    c, mp, _, _ = stripe_env
+    mp.setenv("PRODUCT_PLANS", '{"pro": {"price_label": "$99 / month"}}')
+    r = c.get("/pricing")
+    assert r.status_code == 200 and "text/html" in r.headers["content-type"]
+    page = r.text
+    assert "50 analyze runs / month" in page and "Unlimited" in page and "$99 / month" in page
+    assert "/signup?plan=starter" in page and "/signup?plan=pro" in page
+    assert "/signup?plan=enterprise" not in page and "Not available yet" in page  # no price configured
+    mp.setenv("PRODUCT_CONTACT_URL", "mailto:sales@example.com")
+    assert 'href="mailto:sales@example.com"' in c.get("/pricing").text
+    mp.delenv("STRIPE_SECRET_KEY")  # Stripe off: nothing paid is offered
+    assert "/signup?plan=" not in c.get("/pricing").text
+
+
+def test_pricing_page_escapes_configured_text(env):
+    c, mp = env
+    mp.setenv("PRODUCT_PLANS", '{"free": {"price_label": "<script>alert(1)</script>"}}')
+    mp.setenv("PRODUCT_CONTACT_URL", '"><script>x</script>')
+    page = c.get("/pricing").text
+    assert "<script>alert(1)" not in page and "<script>x</script>" not in page
+
+
+def test_html_pages_are_locked_down(env):
+    c, _ = env
+    for path in ("/pricing", "/signup", "/account"):
+        r = c.get(path)
+        assert r.status_code == 200
+        csp = r.headers["content-security-policy"]
+        assert "default-src 'none'" in csp and "'unsafe-inline'" not in csp and "frame-ancestors 'none'" in csp
+        assert r.headers["x-frame-options"] == "DENY"
+    assert c.get("/account").headers["cache-control"] == "no-store"
+    assert c.get("/signup").headers["cache-control"] == "no-store"
+    n1, n2 = (c.get("/account").headers["content-security-policy"] for _ in range(2))
+    assert n1 != n2  # fresh nonce per response
+
+
+def test_billing_state_drives_the_account_page(stripe_env, monkeypatch):
+    c, mp, calls, fake = stripe_env
+    monkeypatch.setattr(subscriptions.httpx, "post", lambda url, data, headers, auth, timeout: fake(url, data, headers))
+    assert c.get("/billing").status_code == 401
+    t = c.post("/signup", json={"name": "acme"}).json()
+    h = {"x-api-key": t["api_key"]}
+    s = c.get("/billing", headers=h).json()
+    assert s["plan"] == "free" and s["purchasable"] == ["starter", "pro"]
+    assert s["has_subscription"] is False and s["can_manage"] is False
+    assert c.post("/billing/portal", headers=h).status_code == 409  # no customer yet: page hides the button
+    # checkout (what the page's Upgrade button calls) creates the customer, then the portal opens
+    url = c.post("/billing/checkout", json={"plan": "pro", "success_url": "http://t/a", "cancel_url": "http://t/b"}, headers=h)
+    assert url.json() == {"url": "https://stripe/checkout"}
+    assert c.get("/billing", headers=h).json()["can_manage"] is True
+    assert c.post("/billing/portal", json={"return_url": "http://t/a"}, headers=h).json()["url"] == "https://stripe/checkout"
+    # once subscribed, upgrades go through the portal, so no Upgrade buttons
+    r = _hook(c, _sub(t["id"], "cus_1", price="price_pro"))
+    assert r.status_code == 200
+    s = c.get("/billing", headers=h).json()
+    assert s["plan"] == "pro" and s["has_subscription"] and s["purchasable"] == [] and s["subscription_status"] == "active"
+
+
+def test_billing_state_without_stripe_offers_nothing(env):
+    c, _ = env
+    t = c.post("/signup", json={"name": "acme"}).json()
+    s = c.get("/billing", headers={"x-api-key": t["api_key"]}).json()
+    assert s["purchasable"] == [] and s["can_manage"] is False

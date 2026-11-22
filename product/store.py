@@ -24,6 +24,8 @@ CREATE INDEX IF NOT EXISTS usage_tenant_ts ON usage(tenant_id, ts);
 CREATE TABLE IF NOT EXISTS rate_hits (tenant_id TEXT NOT NULL, ts REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS rate_hits_tenant_ts ON rate_hits(tenant_id, ts);
 CREATE TABLE IF NOT EXISTS slack_links (team_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id));
+CREATE TABLE IF NOT EXISTS signup_hits (ip TEXT NOT NULL, ts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS signup_hits_ts ON signup_hits(ts);
 """
 
 
@@ -153,6 +155,20 @@ def rate_hit(tid: str, limit: int, window: float = 60.0) -> bool:
         if c.execute("SELECT COUNT(*) FROM rate_hits WHERE tenant_id=?", (tid,)).fetchone()[0] >= limit:
             return False
         c.execute("INSERT INTO rate_hits(tenant_id,ts) VALUES(?,?)", (tid, now))
+        return True
+
+
+def signup_hit(ip: str, per_ip_hour: int, per_day: int) -> bool:
+    """Anti-abuse for public signup. Records the attempt and returns True if this IP is under its hourly
+    limit and the whole deployment is under its daily limit; a refused attempt is not recorded."""
+    now = time.time()
+    with conn(immediate=True) as c:
+        c.execute("DELETE FROM signup_hits WHERE ts<=?", (now - 86400,))
+        if c.execute("SELECT COUNT(*) FROM signup_hits").fetchone()[0] >= per_day:
+            return False
+        if c.execute("SELECT COUNT(*) FROM signup_hits WHERE ip=? AND ts>?", (ip, now - 3600)).fetchone()[0] >= per_ip_hour:
+            return False
+        c.execute("INSERT INTO signup_hits(ip,ts) VALUES(?,?)", (ip, now))
         return True
 
 

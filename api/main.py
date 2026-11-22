@@ -242,9 +242,11 @@ app.include_router(router)
 
 try:  # commercial layer; absent from the open-core image. Its routes answer 404 unless PRODUCT_DB is set.
     from product.admin import admin, tenant_router, webhook_router
+    from product.web import web_router
 except ImportError:
     pass
 else:
     app.include_router(admin)
     app.include_router(tenant_router)
     app.include_router(webhook_router)
+    app.include_router(web_router)  # /pricing, /signup, /account, /billing

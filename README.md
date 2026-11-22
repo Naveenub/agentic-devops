@@ -106,7 +106,7 @@ The repository includes **realistic sample data** so the agent works out-of-the-
 agentic-devops/
 ├── .github/workflows/eval.yml  # CI: tests, offline eval, report check
 ├── api/
-│   └── main.py                # FastAPI: /analyze, /cost/check, /slack/command, /healthz
+│   └── main.py                # FastAPI: /analyze, /cost/check, /slack/command, /healthz (+ product routes)
 ├── agent/
 │   ├── Makefile
 │   ├── confidence.py
@@ -179,9 +179,11 @@ The open core runs single-tenant with one `AGENT_API_KEY`. Setting `PRODUCT_DB` 
 * **Subscriptions:** creating a tenant creates its Stripe customer (when `STRIPE_SECRET_KEY` is set). Tenants self-serve with `POST /billing/checkout {"plan": "pro"}` (returns a Stripe Checkout URL) and `POST /billing/portal` (card, plan change, cancel); `POST /admin/tenants/{id}/checkout` does the same for you. Point a Stripe webhook at `POST /stripe/webhook` (events: `checkout.session.completed`, `customer.subscription.created|updated|deleted`, `invoice.payment_failed`). The plan follows the subscription's price (`STRIPE_PRICE_<PLAN>`); the first failed payment drops the tenant to `free` immediately (Stripe keeps retrying, and a successful retry restores the paid plan); cancellation, `unpaid` or exhausted retries also end the subscription. Webhooks are signature-verified and idempotent per event id.
 * **Isolation:** inputs that use the server's own kubectl/GitHub/AWS credentials are refused for tenants unless their plan has `shared_tools`; tenants send `"logs": "..."` text instead.
 
+* **Self-serve (`product/web.py`):** `GET /pricing` (plans, included usage, upgrade buttons only for plans Stripe can actually sell), `GET /signup` + `POST /signup {"name": "..."}` (public; creates a `free` tenant and returns its API key once, no Stripe call), and `GET /account` (paste your key: plan, usage, **Upgrade** via Checkout, **Manage billing** via the Stripe portal; backed by `GET /billing`). Signup is rate limited per IP and per day (`PRODUCT_SIGNUP_PER_IP_HOUR`, `PRODUCT_SIGNUP_PER_DAY`), can be closed with `PRODUCT_SIGNUP=off`, and trusts `X-Forwarded-For` only with `PRODUCT_TRUST_PROXY=1`. Prices live in Stripe; set `price_label` per plan in `PRODUCT_PLANS` to show them on `/pricing`, and `PRODUCT_CONTACT_URL` for plans that are not sold online. Pages ship a nonce-based CSP, no cookies, and keep the key in `sessionStorage` only.
+
 Rate limits are stored in the product DB, so they hold across workers. `/slack/command` is metered too: link a workspace with `PUT /admin/tenants/{id}/slack {"team_id": "T…"}` (unlinked workspaces are refused); its rate limit, quota and shared-tool grant then apply as on the HTTP API (`cost …` needs `shared_tools`).
 
-Not covered: SSO/SAML, seat-based pricing, proration previews.
+Not covered: SSO/SAML, seat-based pricing, proration previews, email verification and API-key recovery for self-serve signups.
 
 ---
 
