@@ -6,7 +6,7 @@ LLM_CATEGORY = "other_llm"  # category for a diagnosis proposed by the LLM with 
 class Observation(TypedDict, total=False):
     source: str      # e.g. "kubectl logs", "github actions"
     content: str
-    mock: bool       # True: placeholder data, never used as evidence
+    mock: bool       # True: placeholder data, never used as evidence (e.g. test fixtures)
     error: bool      # True: tool failed, content is the error message
 
 
@@ -14,14 +14,15 @@ class AgentState(TypedDict, total=False):
     # input
     question: str
     kubernetes: dict          # optional: {"namespace": str, "pod": str}
-    github: dict              # optional: {"repo": str, "run_id": str}
+    github: dict              # optional: {"repo": "owner/name", "run_id": "123456789"}; needs GITHUB_TOKEN
     # observe
     observations: List[Observation]
     # diagnose
     category: str             # see agent.signatures; LLM_CATEGORY or "unknown" otherwise
     diagnosis: str
-    diagnosis_source: str     # "signature" | "signature+llm" | "llm" | "none"
+    diagnosis_source: str     # "signature" (regex or terraform parser) | "signature+llm" | "llm" | "none"
     evidence: List[str]
+    terraform: dict           # parse_error() result; only set when it agrees with the category
     rag_sources: List[str]
     llm_suggestions: List[str]
     # suggest

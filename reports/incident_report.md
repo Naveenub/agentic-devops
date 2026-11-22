@@ -1,21 +1,23 @@
 # Incident Report (synthetic dataset)
 
-Dataset: `data/synthetic/incidents.json` - synthetic, not real telemetry. Mock observations are excluded from diagnosis and confidence.
+Dataset: `data/synthetic/incidents.json` - synthetic, not real telemetry. Mock and failed-tool observations are excluded from diagnosis and confidence.
 
-- Cases: 8 | Passed: 8 | Failed: 0
+- Cases: 10 | Passed: 10 | Failed: 0
 - Category accuracy: 100.0%
 - Mean confidence (known categories): 0.8
 
-| ID | Expected | Got | Confidence | Cited | Mock obs | Result |
-|---|---|---|---|---|---|---|
-| SYN-001 | oom_killed | oom_killed | 0.80 | yes | no | PASS |
-| SYN-002 | oom_killed | oom_killed | 0.80 | yes | no | PASS |
-| SYN-003 | iam_denied | iam_denied | 0.80 | yes | no | PASS |
-| SYN-004 | credentials_expired | credentials_expired | 0.80 | yes | no | PASS |
-| SYN-005 | image_pull | image_pull | 0.80 | yes | no | PASS |
-| SYN-006 | unknown | unknown | 0.00 | no | no | PASS |
-| SYN-007 | unknown | unknown | 0.00 | no | yes | PASS |
-| SYN-008 | iam_denied | iam_denied | 0.80 | yes | no | PASS |
+| ID | Expected | Got | Confidence | Cited | Mock obs | Tool error | Result |
+|---|---|---|---|---|---|---|---|
+| SYN-001 | oom_killed | oom_killed | 0.80 | yes | no | no | PASS |
+| SYN-002 | oom_killed | oom_killed | 0.80 | yes | no | no | PASS |
+| SYN-003 | iam_denied | iam_denied | 0.80 | yes | no | no | PASS |
+| SYN-004 | credentials_expired | credentials_expired | 0.80 | yes | no | no | PASS |
+| SYN-005 | image_pull | image_pull | 0.80 | yes | no | no | PASS |
+| SYN-006 | unknown | unknown | 0.00 | no | no | no | PASS |
+| SYN-007 | unknown | unknown | 0.00 | no | no | yes | PASS |
+| SYN-008 | iam_denied | iam_denied | 0.80 | yes | no | no | PASS |
+| SYN-009 | state_lock | state_lock | 0.80 | yes | no | no | PASS |
+| SYN-010 | credentials_expired | credentials_expired | 0.80 | yes | no | no | PASS |
 
 ## Evidence
 
@@ -51,3 +53,11 @@ Dataset: `data/synthetic/incidents.json` - synthetic, not real telemetry. Mock o
 **SYN-008**
 - ci log: Error: AccessDeniedException: User is not authorized to perform s3:PutObject
 - retrieved: data/runbooks/terraform-iam-deny.md
+
+**SYN-009**
+- ci log: Error: Error acquiring the state lock
+- retrieved: data/runbooks/terraform-state-lock.md
+
+**SYN-010**
+- ci log: Error: No valid credential sources found
+- retrieved: data/incidents/2025-01-ci-permission.json

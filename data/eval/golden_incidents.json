@@ -209,5 +209,22 @@
       }
     ],
     "expected_category": "unknown"
+  },
+  {
+    "id": "GOLD-013",
+    "query": "terraform apply failed in CI, is something else running?",
+    "observations": [
+      {
+        "source": "github actions",
+        "content": "Error: Error acquiring the state lock\n\nError message: ConditionalCheckFailedException: The conditional request failed\nLock Info:\n  ID:        00000000-0000-0000-0000-000000000000\n  Operation: OperationTypeApply"
+      }
+    ],
+    "expected_category": "state_lock",
+    "expected_sources": [
+      "data/runbooks/terraform-state-lock.md"
+    ],
+    "root_cause_keywords": [
+      "lock"
+    ]
   }
 ]

@@ -231,6 +231,14 @@ policy:
 
 ---
 
+## 🔧 GitHub Actions & Terraform
+
+* `POST /analyze` with `{"question": "...", "github": {"repo": "owner/name", "run_id": "123456789"}}` fetches the last 200 lines of each failed job (up to 3) of that run via two read-only `GET` calls. The token is sent to `api.github.com` only, never to the signed log URL.
+* Terraform errors in any real observation are parsed (`agent/tools/terraform.py`): the parser names the category when no regex signature matched (`iam_denied`, `credentials_expired`, `state_lock`) and, for IAM denials, adds the denied action/resource to the diagnosis and the first suggestion. If a regex signature already matched a different category, the signature wins.
+* No `GITHUB_TOKEN`, bad token, missing run, or a run with no failed jobs yields an error observation (confidence 0), not a guess.
+
+---
+
 ## 🧠 LLM Diagnosis
 
 Enabled when `OPENAI_API_KEY` is set (or `OPENAI_BASE_URL` for a local OpenAI-compatible server, e.g. LLaMA). `AGENT_LLM=off` disables it; `AGENT_LLM_MODEL` selects the model (default `gpt-4o-mini`).
@@ -337,6 +345,7 @@ Edit `.env`:
 
 ```env
 OPENAI_API_KEY=sk-xxxx
+GITHUB_TOKEN=github_pat_xxxx   # optional: read-only (Actions: read), enables CI log analysis
 ```
 
 ### 3️⃣ Run
@@ -536,7 +545,7 @@ make report-check   # CI: fails if the committed report is stale or any case fai
 Notes:
 
 * `data/synthetic/incidents.json` is hand-written test data, never ingested into the knowledge base.
-* The CI log tool (`agent/tools/github.py`) is a **labelled mock**; mock and failed-tool observations are never used as evidence and contribute zero confidence.
+* The CI log tool (`agent/tools/github.py`) reads real GitHub Actions logs (read-only, `GITHUB_TOKEN` required). The report and tests never touch the network; failed-tool and mock observations are never used as evidence and contribute zero confidence.
 * Default retriever is local/offline; set `AGENT_RETRIEVER=chroma` to use Chroma (`make ingest` first). Chroma's default embedder downloads a model on first use; set `CHROMA_EMBEDDER=hash` for a deterministic offline embedder.
 * `make eval` runs the golden-incident check and the unsupported-token check from `data/eval/` (offline).
 * `agent/tools/aws_costs.py` is a z-score check over read-only Cost Explorer data; it returns no verdict (`anomaly: None`) when data is missing.

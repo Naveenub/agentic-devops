@@ -17,6 +17,7 @@ DIAGNOSIS = {
     "iam_denied": "Operation failed with an IAM AccessDenied: the calling role lacks a required permission.",
     "credentials_expired": "Credentials/security token used by the pipeline have expired.",
     "image_pull": "Pod cannot pull its image (bad tag or missing registry permissions).",
+    "state_lock": "Terraform state is locked by another run (or a stale lock).",
     UNKNOWN: "Insufficient evidence: no recognised failure signature in the observations.",
 }
 
@@ -39,6 +40,10 @@ SUGGESTIONS = {
         "Verify the image and tag exist in the registry.",
         "Check registry permissions / imagePullSecrets for the namespace.",
     ],
+    "state_lock": [
+        "Read the Lock Info (ID, Who, Created) in the error to find the run holding the lock.",
+        "Wait for that run to finish; if it is dead, a human decides whether to release the stale lock.",
+    ],
     UNKNOWN: [
         "Collect more evidence (pod events, previous container logs, CI step output) and re-run.",
         "Escalate to a human if the impact is ongoing.",
@@ -51,6 +56,15 @@ CORROBORATING = {
     "iam_denied": {"terraform-iam-deny.md", "2024-12-tf-apply-fail.json"},
     "credentials_expired": {"2025-01-ci-permission.json"},
     "image_pull": {"imagepullbackoff.md"},
+    "state_lock": {"terraform-state-lock.md"},
+}
+
+# agent.tools.terraform.parse_error kind -> category. Used when no regex signature matched,
+# and to enrich (action/resource) when it agrees with the signature category.
+TERRAFORM_CATEGORY = {
+    "iam_denied": "iam_denied",
+    "credentials": "credentials_expired",
+    "state_lock": "state_lock",
 }
 
 

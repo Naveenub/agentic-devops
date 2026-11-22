@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 os.environ["AGENT_RETRIEVER"] = "local"  # reproducible regardless of caller env
+os.environ.pop("GITHUB_TOKEN", None)     # never hit the network: the github tool then fails fast
 
 from agent.orchestrator import run_agent  # noqa: E402
 from agent.signatures import UNKNOWN  # noqa: E402
@@ -32,6 +33,7 @@ def run_case(case: dict) -> dict:
     conf = result["confidence"]
     cited = any(e.startswith("retrieved: ") for e in result["evidence"])
     has_mock = any(o.get("mock") for o in result["observations"])
+    has_error = any(o.get("error") for o in result["observations"])
 
     checks = {"category": got == expected}
     if expected == UNKNOWN:
@@ -41,6 +43,8 @@ def run_case(case: dict) -> dict:
         checks["cited"] = cited
     if case.get("expect_mock_observation"):
         checks["mock_flagged"] = has_mock
+    if case.get("expect_error_observation"):
+        checks["error_flagged"] = has_error
 
     return {
         "id": case["id"],
@@ -49,6 +53,7 @@ def run_case(case: dict) -> dict:
         "confidence": conf,
         "cited": cited,
         "mock_observation": has_mock,
+        "error_observation": has_error,
         "evidence": result["evidence"],
         "passed": all(checks.values()),
         "failed_checks": sorted(k for k, v in checks.items() if not v),
@@ -80,19 +85,20 @@ def to_markdown(report: dict) -> str:
         "# Incident Report (synthetic dataset)",
         "",
         f"Dataset: `{report['dataset']}` - synthetic, not real telemetry. "
-        "Mock observations are excluded from diagnosis and confidence.",
+        "Mock and failed-tool observations are excluded from diagnosis and confidence.",
         "",
         f"- Cases: {s['cases']} | Passed: {s['passed']} | Failed: {s['failed']}",
         f"- Category accuracy: {s['category_accuracy']:.1%}",
         f"- Mean confidence (known categories): {s['mean_confidence_known']}",
         "",
-        "| ID | Expected | Got | Confidence | Cited | Mock obs | Result |",
-        "|---|---|---|---|---|---|---|",
+        "| ID | Expected | Got | Confidence | Cited | Mock obs | Tool error | Result |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in report["cases"]:
         lines.append(
             f"| {r['id']} | {r['expected']} | {r['got']} | {r['confidence']:.2f} | "
             f"{'yes' if r['cited'] else 'no'} | {'yes' if r['mock_observation'] else 'no'} | "
+            f"{'yes' if r['error_observation'] else 'no'} | "
             f"{'PASS' if r['passed'] else 'FAIL: ' + ', '.join(r['failed_checks'])} |"
         )
     lines += ["", "## Evidence", ""]

@@ -10,7 +10,6 @@ from agent.nodes.suggest import suggest
 from agent.orchestrator import run_agent
 from agent.state import AgentState
 from agent.tools import kubernetes
-from agent.tools.github import MOCK_LABEL, get_ci_logs
 
 OOM_OBS = [{"source": "kubectl logs", "content": "Container terminated with exit code 137"}]
 
@@ -50,11 +49,16 @@ def test_no_evidence_means_zero_confidence():
     assert (r["category"], r["confidence"], r["evidence"]) == ("unknown", 0.0, [])
 
 
-def test_ci_mock_is_labelled_and_never_evidence():
-    assert get_ci_logs("o/r", "1")["mock"] is True
-    assert MOCK_LABEL in get_ci_logs("o/r", "1")["content"]
+def test_github_without_token_is_an_error_observation_not_evidence(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     r = run_agent({"question": "ci failed", "github": {"repo": "o/r", "run_id": "1"}})
-    assert r["observations"][0]["mock"] is True
+    assert r["observations"][0]["error"] is True and "GITHUB_TOKEN" in r["observations"][0]["content"]
+    assert r["category"] == "unknown" and r["confidence"] == 0.0
+
+
+def test_mock_observations_are_never_evidence():
+    mock = [{"source": "github actions", "content": "Container terminated with exit code 137", "mock": True}]
+    r = run_agent({"question": "ci failed", "observations": mock})
     assert r["category"] == "unknown" and r["confidence"] == 0.0
 
 
