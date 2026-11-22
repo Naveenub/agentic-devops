@@ -18,6 +18,13 @@ RUN apt-get update \
     && apt-get purge -y --auto-remove curl \
     && rm -rf /var/lib/apt/lists/*
 
+# AWS CLI: EKS kubeconfigs authenticate via `aws eks get-token`. Isolated venv so its
+# botocore pins can't conflict with boto3 in requirements.txt.
+ARG AWSCLI_VERSION=1.46.3
+RUN python -m venv /opt/awscli \
+    && /opt/awscli/bin/pip install --no-cache-dir "awscli==${AWSCLI_VERSION}" \
+    && ln -s /opt/awscli/bin/aws /usr/local/bin/aws
+
 WORKDIR /app
 
 # Install dependencies first so this layer is cached unless requirements.txt changes.
