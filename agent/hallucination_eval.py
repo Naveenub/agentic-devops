@@ -34,8 +34,8 @@ def main(argv=()) -> int:
     limits = json.loads((EVAL_DIR / "expected_outputs.json").read_text(encoding="utf-8"))
     max_ratio, max_specifics = limits["max_unsupported_ratio"], limits.get("max_unsupported_specifics", 0)
     if judge and not llm.enabled():
-        print("SKIP --judge: no LLM configured; running without it")
-        judge = False
+        print("FAIL --judge: no LLM configured; nothing was judged")
+        return 2
     status = scored = judge_failed = 0
     real = 0
     for c in load_cases():

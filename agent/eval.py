@@ -2,7 +2,9 @@
 
   python -m agent.eval                # offline + deterministic: signatures, retrieval, guardrails.
                                       # LLM behaviour is stubbed from each case's `llm_fixture`.
-  python -m agent.eval --live         # real LLM (OPENAI_API_KEY / OPENAI_BASE_URL): measures LLM accuracy
+  python -m agent.eval --live         # real LLM (OPENAI_API_KEY / OPENAI_BASE_URL): measures LLM accuracy.
+                                      # Exits 2 with no LLM configured, and 1 with 0 real cases (UNPROVEN).
+  python -m agent.eval --live --allow-golden-only   # smoke run on hand-written cases; labelled NOT ACCURACY
   python -m agent.eval --min-real 20  # also fail unless >= 20 real-incident cases exist
                                       # (default: the number in data/eval/real/MIN_REAL, a ratchet: raise it as
                                       #  real cases are added, so the count can never silently shrink)
@@ -165,6 +167,8 @@ def evaluate_case(case: dict, criteria: dict, live: bool = False) -> dict:
 def main(argv=()) -> int:
     ap = argparse.ArgumentParser(prog="python -m agent.eval")
     ap.add_argument("--live", action="store_true", help="use the real LLM instead of fixtures")
+    ap.add_argument("--allow-golden-only", action="store_true",
+                    help="with --live: permit a run with 0 real cases (smoke test, not an accuracy result)")
     ap.add_argument("--min-real", type=int, default=None,
                     help="fail unless at least N real cases exist (default: data/eval/real/MIN_REAL)")
     args = ap.parse_args(list(argv))
@@ -175,9 +179,9 @@ def main(argv=()) -> int:
     status = 0
 
     if args.live:
-        if not llm.enabled():
-            print("SKIP --live: no LLM configured (set OPENAI_API_KEY or OPENAI_BASE_URL)")
-            return 0
+        if not llm.enabled():  # a skipped live eval must never look like a pass
+            print("FAIL --live: no LLM configured (set OPENAI_API_KEY or OPENAI_BASE_URL); nothing was measured")
+            return 2
         cases = [c for c in cases if not c.get("offline_only")]
 
     for c in (c for c in cases if c["tier"] == "real"):
@@ -199,6 +203,7 @@ def main(argv=()) -> int:
         print(f"{r['id']} [{r['tier']}]: {verdict} confidence={r['confidence']}")
 
     tiers = Counter(r["tier"] for r in rows)
+    n_real = tiers.get("real", 0)
     by_cat = Counter(r["expected"] for r in rows)
     gaps = sum(1 for r in rows if r["known_gap"] and not r["passed"])
     print(f"summary: {fmt_rate(sum(r['passed'] for r in rows), len(rows))} passed"
@@ -209,13 +214,22 @@ def main(argv=()) -> int:
         print(f"  {t}: {fmt_rate(sum(r['passed'] for r in rows if r['tier'] == t), tiers[t])}")
     if args.live:
         llm_rows = [r for r in rows if r["diagnosis_source"] in ("llm", "signature+llm") or r["expected"] in (LLM_CATEGORY, UNKNOWN)]
-        print(f"live LLM: {sum(r['passed'] for r in llm_rows)}/{len(llm_rows)} LLM-relevant cases passed "
-              f"({tiers.get('real', 0)} real)")
-    if tiers.get("real", 0) < min_real:
-        print(f"FAIL: {tiers.get('real', 0)} real cases < --min-real {min_real}")
+        print(f"live LLM: {fmt_rate(sum(r['passed'] for r in llm_rows), len(llm_rows))} LLM-relevant cases passed "
+              f"({n_real} real)")
+        real_llm = [r for r in llm_rows if r["tier"] == "real"]
+        if real_llm:
+            print(f"live LLM, real incidents only: {fmt_rate(sum(r['passed'] for r in real_llm), len(real_llm))}")
+    if n_real < min_real:
+        print(f"FAIL: {n_real} real cases < --min-real {min_real}")
         status = 1
-    if not tiers.get("real"):
-        print("WARNING: 0 real-incident cases (data/eval/real/). Passing here is not evidence of real-world accuracy.")
+    if not n_real:
+        if args.live and not args.allow_golden_only:
+            print("UNPROVEN: live run covered 0 real incidents, so this is not a measurement of real-world accuracy. "
+                  "Add cases to data/eval/real/ (or pass --allow-golden-only for a smoke run).")
+            status = 1
+        else:
+            print("WARNING: 0 real-incident cases (data/eval/real/). Passing here is not evidence of real-world accuracy.")
+        print("real-world accuracy: NOT MEASURED (0 real cases); the golden rate above is a fixture/guardrail check")
     return status
 
 

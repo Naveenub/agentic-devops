@@ -175,10 +175,31 @@ def test_min_real_gate_fails_until_real_cases_exist(capsys):
     assert ev.main([]) == 0
 
 
-def test_live_is_skipped_without_an_llm(monkeypatch, capsys):
+def test_live_fails_without_an_llm(monkeypatch, capsys):
     monkeypatch.setenv("AGENT_LLM", "off")
-    assert ev.main(["--live"]) == 0
-    assert "SKIP --live" in capsys.readouterr().out
+    assert ev.main(["--live"]) == 2
+    assert "nothing was measured" in capsys.readouterr().out
+
+
+def test_judge_fails_without_an_llm(monkeypatch, capsys):
+    monkeypatch.setenv("AGENT_LLM", "off")
+    assert hallucination_eval.main(["--judge"]) == 2
+    assert "nothing was judged" in capsys.readouterr().out
+
+
+def test_live_with_zero_real_cases_is_unproven(monkeypatch, capsys):
+    llm.set_client(lambda system, user: "{}")
+    # empty set: 0 real cases -> UNPROVEN unless explicitly allowed
+    monkeypatch.setattr(ev, "load_cases", lambda *a, **k: [])
+    assert ev.main(["--live"]) == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+    assert ev.main(["--live", "--allow-golden-only"]) == 0
+    assert "real-world accuracy: NOT MEASURED" in capsys.readouterr().out
+
+
+def test_offline_summary_states_real_accuracy_is_not_measured(capsys):
+    assert ev.main([]) == 0
+    assert "real-world accuracy: NOT MEASURED" in capsys.readouterr().out
 
 
 # --- eval size / honesty -----------------------------------------------------------------------

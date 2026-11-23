@@ -282,7 +282,8 @@ Enabled when `OPENAI_API_KEY` is set (or `OPENAI_BASE_URL` for a local OpenAI-co
 
 ```bash
 make eval        # offline, deterministic (runs in CI): golden set + groundedness
-make live-eval   # real LLM (needs OPENAI_API_KEY / OPENAI_BASE_URL): LLM accuracy + LLM judge
+make live-eval   # smoke: real LLM on the hand-written set (needs OPENAI_API_KEY / OPENAI_BASE_URL). Fails with no LLM. NOT an accuracy result
+make accuracy-claim  # live LLM + >= 20 real incidents + judge. Fails (UNPROVEN) until data/eval/real/ has cases
 ```
 
 **Golden set** (`data/eval/golden_incidents.json`): hand-written cases covering every signature category,

@@ -1,4 +1,4 @@
-.PHONY: legal-check legal-fill help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync stripe-e2e billing-report pricing-check pricing-measure
+.PHONY: accuracy-claim legal-check legal-fill help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync stripe-e2e billing-report pricing-check pricing-measure
 
 help:
 	@echo "Targets: test eval live-eval report report-check ingest up image image-product"
@@ -13,8 +13,14 @@ eval:
 test:
 	python -m pytest -q
 
+# Smoke run of the live model on the hand-written set. Not an accuracy result (0 real cases is allowed here).
 live-eval:
-	python -m agent.eval --live
+	python -m agent.eval --live --allow-golden-only
+	python -m agent.hallucination_eval --judge
+
+# The only target whose pass means something: live model, real incidents required (>= 20), per-claim judge.
+accuracy-claim:
+	python -m agent.eval --live --min-real 20
 	python -m agent.hallucination_eval --judge
 
 report:
