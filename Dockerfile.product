@@ -3,7 +3,7 @@
 ARG BASE=agentic-devops-core
 FROM ${BASE}
 USER root
-RUN mkdir -p /data/product && chown app:app /data/product
+RUN mkdir -p /data/product /data/approvals && chown app:app /data/product /data/approvals
 COPY --chown=app:app product/ product/
 RUN pip install --no-cache-dir -r product/requirements.txt  # PostgreSQL driver
 USER app

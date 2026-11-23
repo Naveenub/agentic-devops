@@ -1,0 +1,62 @@
+# Hosted deployment: Caddy (automatic HTTPS) -> api (product image) -> PostgreSQL.
+#   cp .env.production.example .env.production   # fill in, then:
+#   make prod-up
+# Only Caddy publishes ports (80/443). api and db are reachable on the internal network only.
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env.production}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env.production}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    image: agentic-devops-product   # built by `make prod-up` (core image first, then Dockerfile.product)
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      PRODUCT_DB: postgresql://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/agent
+      PRODUCT_PUBLIC_URL: https://${DOMAIN}
+      PRODUCT_TRUST_PROXY: "1"   # Caddy is the only thing that can reach api, and it sets X-Forwarded-For
+      AGENT_APPROVALS_DB: /data/approvals/approvals.db
+    volumes:
+      - chroma-data:/data/chroma
+      - approvals-data:/data/approvals
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8000"
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: agent
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  caddy-data:
+  caddy-config:
+  chroma-data:
+  approvals-data:
+  pg-data:

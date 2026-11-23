@@ -1,4 +1,4 @@
-.PHONY: accuracy-claim legal-check legal-fill help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync stripe-e2e billing-report pricing-check pricing-measure
+.PHONY: prod-up prod-down prod-logs prod-backup mail-test accuracy-claim legal-check legal-fill help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync stripe-e2e billing-report pricing-check pricing-measure
 
 help:
 	@echo "Targets: test eval live-eval report report-check ingest up image image-product"
@@ -73,3 +73,24 @@ pricing-check:
 # Measure real tokens per analysis (needs OPENAI_API_KEY / OPENAI_BASE_URL) and record them in pricing_evidence.json
 pricing-measure:
 	python -m product.unit_economics measure
+
+# Hosted deployment (docker-compose.prod.yml: Caddy HTTPS + api + PostgreSQL). Needs .env.production.
+PROD = docker compose --env-file .env.production -f docker-compose.prod.yml
+
+prod-up: image-product
+	$(PROD) up -d
+
+prod-down:
+	$(PROD) down
+
+prod-logs:
+	$(PROD) logs -f --tail=100 api caddy
+
+prod-backup:
+	@mkdir -p backups
+	$(PROD) exec -T db pg_dump -U agent agent | gzip > backups/agent-$$(date +%F-%H%M).sql.gz
+
+# Send a real test email through the configured SMTP server: make mail-test TO=you@example.com
+mail-test:
+	@test -n "$(TO)" || { echo "usage: make mail-test TO=you@example.com"; exit 2; }
+	$(PROD) exec -T api python -c "from product import mailer; assert mailer.configured(), 'SMTP_HOST/SMTP_FROM/PUBLIC_URL not all set'; mailer.send('$(TO)', 'Mail test', 'SMTP works.'); print('sent')"
