@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Production secrets
+.env.*
+!.env.example
+!.env.production.example
+backups/
