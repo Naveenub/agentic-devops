@@ -20,6 +20,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: MIN_REAL ratchet cannot be lowered
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          base=$(git show "origin/${{ github.base_ref }}:data/eval/real/MIN_REAL" 2>/dev/null || echo 0)
+          head=$(cat data/eval/real/MIN_REAL)
+          test "$head" -ge "$base" || { echo "MIN_REAL lowered: $base -> $head"; exit 1; }
+
       - name: Unit tests
         run: make test
 
@@ -50,7 +58,7 @@ jobs:
         run: test -n "$OPENAI_API_KEY" || { echo "OPENAI_API_KEY secret not set"; exit 1; }
 
       - name: Live eval + groundedness judge
-        run: make live-eval
+        run: make live-eval   # smoke on golden cases; `make accuracy-claim` is the real-incident gate
 
   test-postgres:
     runs-on: ubuntu-latest
