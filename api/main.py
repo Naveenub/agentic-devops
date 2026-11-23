@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 
-from agent import approvals, llm
+from agent import approvals, executor, llm
 from agent.cost_watch import check_cost, parse_watch, watch_forever
 from agent.graph import build_graph
 
@@ -93,6 +93,8 @@ def _release(row_id: int | None) -> None:
 def _run(question: str, extra: dict | None = None) -> dict:
     state = {"question": question}
     state.update({k: v for k, v in (extra or {}).items() if k in ("kubernetes", "github", "cost")})
+    if not product_enabled() and isinstance((extra or {}).get("fix"), dict):  # single-org only, like /fixes
+        state["fix"] = extra["fix"]
     logs = (extra or {}).get("logs")
     if isinstance(logs, str) and logs.strip():  # caller-supplied log text: no server credentials needed
         state["observations"] = [{"source": "supplied logs", "content": logs[-20000:]}]
@@ -292,27 +294,10 @@ def _label(value, default: str) -> str:
 
 @router.post("/fixes", status_code=201, dependencies=[Depends(require_api_key), Depends(_fixes_available)])
 def propose_fix(payload: dict):
-    from agent.tools.github import GitHubToolError, _check_repo
-    from agent.tools.github_pr import MAX_CONTENT, check_path
-
-    allowed = {r.strip() for r in os.getenv("AGENT_PR_REPOS", "").split(",") if r.strip()}
-    repo = payload.get("repo")
-    if repo not in allowed:  # fail closed: empty AGENT_PR_REPOS allows nothing
-        raise HTTPException(status_code=403, detail="repo is not in AGENT_PR_REPOS")
-    base = payload.get("base") or "main"
-    title, content = payload.get("title"), payload.get("content")
     try:
-        _check_repo(repo), check_path(payload.get("path"))
-    except GitHubToolError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    if not isinstance(title, str) or not title.strip() or len(title) > 200:
-        raise HTTPException(status_code=422, detail="'title' is required (at most 200 characters)")
-    if not isinstance(content, str) or len(content) > MAX_CONTENT:
-        raise HTTPException(status_code=422, detail=f"'content' must be text of at most {MAX_CONTENT} characters")
-    if not isinstance(base, str):
-        raise HTTPException(status_code=422, detail="'base' must be a branch name")
-    fix = approvals.create(repo, base, payload["path"], content, title.strip(), str(payload.get("summary") or "")[:2000],
-                           _label(payload.get("requested_by"), "api"))
+        fix = executor.propose(payload, _label(payload.get("requested_by"), "api"))
+    except executor.ExecutorError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
     return {"id": fix["id"], "status": fix["status"]}
 
 
@@ -336,25 +321,10 @@ def reject_fix(fid: str, x_approver: str | None = Header(None)):
 
 @router.post("/fixes/{fid}/approve", dependencies=[Depends(require_approver), Depends(_fixes_available)])
 def approve_fix(fid: str, x_approver: str | None = Header(None)):
-    from agent.tools.github import GitHubToolError
-    from agent.tools.github_pr import open_fix_pr
-
-    fix = _fix(fid)
-    allowed = {r.strip() for r in os.getenv("AGENT_PR_REPOS", "").split(",") if r.strip()}
-    if fix["repo"] not in allowed:  # the allowlist may have shrunk since the proposal was made
-        raise HTTPException(status_code=403, detail="repo is not in AGENT_PR_REPOS")
-    who = _label(x_approver, "approver")
-    if not approvals.claim(fid, "approving", who):  # atomic: two approvals cannot both open a PR
-        raise HTTPException(status_code=409, detail="fix is not pending")
     try:
-        pr = open_fix_pr(fix["repo"], fix["base"], f"agent-fix/{fid}", fix["path"], fix["content"], fix["title"],
-                         f"{fix['summary']}\n\n---\nProposed by {fix['requested_by']}, approved by {who}. "
-                         "Opened by the DevOps AI Agent after human approval; review before merging.")
-    except GitHubToolError as e:
-        approvals.finish(fid, "failed", error=str(e))
-        raise HTTPException(status_code=502, detail=str(e))
-    approvals.finish(fid, "opened", pr_url=pr["url"])
-    return {"id": fid, "status": "opened", "pr_url": pr["url"]}
+        return executor.execute_approved(fid, _label(x_approver, "approver"))
+    except executor.ExecutorError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
 
 
 @router.post("/slack/command")

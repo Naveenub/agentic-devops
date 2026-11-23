@@ -16,6 +16,7 @@ class AgentState(TypedDict, total=False):
     kubernetes: dict          # optional: {"namespace": str, "pod": str}
     github: dict              # optional: {"repo": "owner/name", "run_id": "123456789"}; needs GITHUB_TOKEN
     cost: dict                # optional: {"service": "EC2", "region": "us-east-1", "threshold": 2.0}; read-only Cost Explorer
+    fix: dict                 # optional: {"repo","path","content","title","base","summary"}; queued for human approval, never applied
     # observe
     observations: List[Observation]
     cost_anomaly: dict        # analyze_cost_anomaly() result; only set when `cost` was supplied
@@ -32,6 +33,8 @@ class AgentState(TypedDict, total=False):
     suggestions: List[str]
     confidence: float
     answer: str
+    # execute
+    fix_proposal: dict        # {"id","status"} when queued; {"status","error"} when it could not be
 
 
 def real_observations(state: AgentState) -> List[Observation]:

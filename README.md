@@ -117,6 +117,7 @@ agentic-devops/
 │   ├── hallucination_eval.py
 │   ├── llm.py                 # OpenAI-compatible client + guardrails
 │   ├── orchestrator.py
+│   ├── executor.py          # approval-gated write path (propose / execute_approved)
 │   ├── real_case.py
 │   ├── report.py              # Synthetic incident report
 │   ├── signatures.py          # Regex failure signatures
@@ -530,7 +531,7 @@ Set `AGENT_APPROVALS_DB` (SQLite file), `AGENT_APPROVER_KEY` (must differ from `
 * [x] Multi-tenant product layer (open-core split)
 * [x] Terraform drift analysis (`terraform plan` output, category `terraform_drift`)
 * [x] PR creation for fixes, only after human approval (`/fixes`; one file per PR, never merges)
-* [ ] Multi-agent (Observer / Diagnoser / Executor)
+* [x] Multi-agent (Observer / Diagnoser / Suggestor / Executor); the Executor only queues proposals, a human approval opens the PR
 * [x] Human-in-the-loop approval before any write to GitHub
 
 ---
