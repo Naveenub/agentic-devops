@@ -1,0 +1,26 @@
+name: stripe-e2e
+
+# Real Stripe TEST-mode run: sync --apply, checkout, webhook, usage report, cancel (product/stripe_e2e.py).
+# Needs repo secret STRIPE_TEST_SECRET_KEY (sk_test_... or rk_test_...). Without it the job FAILS, never passes silently.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"
+
+jobs:
+  stripe-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r product/requirements.txt
+      - name: Stripe test-mode end to end
+        env:
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+        run: |
+          if [ -z "$STRIPE_SECRET_KEY" ]; then echo "::error::secret STRIPE_TEST_SECRET_KEY is not set"; exit 1; fi
+          python -m product.stripe_e2e
