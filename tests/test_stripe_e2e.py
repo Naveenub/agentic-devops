@@ -1,7 +1,9 @@
 """The e2e runner's own safety and plumbing; the Stripe-facing part runs only via `make stripe-e2e`."""
 from fastapi.testclient import TestClient
 
-from product import stripe_e2e, store
+import httpx
+
+from product import stripe_e2e, store, subscriptions as subs
 
 
 def test_refuses_live_and_missing_keys(monkeypatch, capsys):
@@ -23,3 +25,22 @@ def test_deliver_signs_for_the_real_webhook_route(tmp_path, monkeypatch):
     c = TestClient(app)
     assert stripe_e2e.deliver(c, ev) == "200:handled"
     assert stripe_e2e.deliver(c, ev) == "200:duplicate"
+
+
+def test_preflight_reports_bad_key_and_network_failure():
+    assert stripe_e2e.preflight(lambda *a, **k: {"data": []}) is None
+
+    def rejected(*a, **k):
+        raise subs.StripeError("GET /billing/meters -> 401: Invalid API Key")
+
+    def down(*a, **k):
+        raise httpx.ConnectError("no route")
+    assert "rejected" in stripe_e2e.preflight(rejected)
+    assert "unreachable" in stripe_e2e.preflight(down)
+
+
+def test_main_stops_on_failed_preflight(monkeypatch, capsys):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+    monkeypatch.setattr(stripe_e2e, "preflight", lambda call=None: "key rejected")
+    assert stripe_e2e.main([]) == 2
+    assert "key rejected" in capsys.readouterr().out

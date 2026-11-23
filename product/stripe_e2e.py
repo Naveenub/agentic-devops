@@ -45,6 +45,18 @@ def api(method: str, path: str, data: dict | None = None):
     return r.json()
 
 
+def preflight(call=None) -> str | None:
+    """Cheap authenticated call before anything is written: a bad key, no network, or an account without Billing
+    Meters fails here with one clear line instead of halfway through the run. None = fine."""
+    try:
+        (call or api)("GET", "/billing/meters", {"limit": 1})
+    except httpx.HTTPError as e:
+        return f"Stripe unreachable: {e}"
+    except subs.StripeError as e:
+        return f"key rejected or Billing Meters unavailable on this account: {e}"
+    return None
+
+
 def poll(fn, timeout: float = 60, every: float = 3):
     end = time.time() + timeout
     while True:
@@ -158,6 +170,9 @@ def main(argv=None) -> int:
         return 2
     plan = argv[argv.index("--plan") + 1] if "--plan" in argv else "pro"
     get_plan(plan)
+    if err := preflight():
+        print(f"refusing to run: {err}")
+        return 2
     tmp = tempfile.mkdtemp()
     os.environ.update({"PRODUCT_DB": os.path.join(tmp, "e2e.db"), "AGENT_LLM": "off", "PRODUCT_ADMIN_KEY": "e2e"})
     try:
