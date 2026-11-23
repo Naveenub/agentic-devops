@@ -15,7 +15,7 @@ def env(tmp_path, monkeypatch):
     if pg:
         with store.conn() as db:
             db.execute("TRUNCATE tenants, stripe_events, api_keys, usage, rate_hits, slack_links, signup_hits, "
-                       "recover_hits, recovery_tokens, verify_tokens, job_runs RESTART IDENTITY CASCADE")
+                       "recover_hits, recovery_tokens, verify_tokens, job_runs, tenant_members, member_invites, invite_hits, sso_hits, tenant_sso RESTART IDENTITY CASCADE")
     monkeypatch.setenv("PRODUCT_ADMIN_KEY", "adm")
     monkeypatch.setenv("AGENT_LLM", "off")
     monkeypatch.setenv("PRODUCT_SIGNUP", "on")  # signup is closed unless opened; most tests need it open
@@ -291,8 +291,8 @@ def stripe_env(env):
     c, mp = env
     mp.setenv("STRIPE_SECRET_KEY", "sk_test")
     mp.setenv("STRIPE_WEBHOOK_SECRET", WH)
-    mp.setenv("STRIPE_PRICE_STARTER", "price_starter")
-    mp.setenv("STRIPE_PRICE_PRO", "price_pro,price_use:metered")
+    mp.setenv("STRIPE_PRICE_STARTER", "price_starter,price_starter_seat:seat")
+    mp.setenv("STRIPE_PRICE_PRO", "price_pro,price_use:metered,price_seat:seat")
     mp.setenv("STRIPE_SUCCESS_URL", "https://x/ok")
     mp.setenv("STRIPE_CANCEL_URL", "https://x/no")
     calls = []
@@ -323,6 +323,7 @@ def test_checkout_creates_session_with_tenant_metadata(stripe_env, monkeypatch):
     d = calls[-1][1]
     assert d["customer"] == "cus_1" and d["client_reference_id"] == t["id"] and d["mode"] == "subscription"
     assert d["line_items[0][quantity]"] == "1" and "line_items[1][quantity]" not in d  # metered price: no quantity
+    assert d["line_items[2][price]"] == "price_seat" and d["line_items[2][quantity]"] == "1"  # seat price: one per active member
     assert d["subscription_data[metadata][plan]"] == "pro"
     # unpurchasable / unknown plan, missing key
     assert c.post("/billing/checkout", json={"plan": "enterprise"}, headers={"x-api-key": t["api_key"]}).status_code == 422
@@ -546,7 +547,7 @@ def test_pricing_page_lists_plans_and_only_offers_what_can_be_bought(stripe_env)
     r = c.get("/pricing")
     assert r.status_code == 200 and "text/html" in r.headers["content-type"]
     page = r.text
-    assert "50 analyze runs / month" in page and "Unlimited" in page and "$99 / month + usage" in page
+    assert "50 analyze runs / month" in page and "Unlimited" in page and "$99 / month + $25 / seat + usage" in page
     assert "/signup?plan=starter" in page and "/signup?plan=pro" in page
     assert "/signup?plan=enterprise" not in page and "Not available yet" in page  # no price configured
     mp.setenv("PRODUCT_CONTACT_URL", "mailto:sales@example.com")
@@ -618,7 +619,7 @@ def test_pricing_shows_catalog_prices_without_calling_stripe(stripe_env, monkeyp
 
     monkeypatch.setattr(subscriptions.httpx, "get", boom)
     page = c.get("/pricing").text
-    assert "$0" in page and "$49 / month + usage" in page and "$99 / month + usage" in page
+    assert "$0" in page and "$49 / month + $15 / seat + usage" in page and "$99 / month + $25 / seat + usage" in page
     assert "Shown at checkout" not in page
 
 
@@ -626,7 +627,7 @@ def test_price_override_goes_through_plans_not_free_text(stripe_env):
     c, mp, _, _ = stripe_env
     mp.setenv("PRODUCT_PLANS", '{"starter": {"base_cents": 3900, "overage": {}}}')
     page = c.get("/pricing").text
-    assert "$39 / month + usage" in page  # overage merges with the default; rates stay in plans.py
+    assert "$39 / month + $15 / seat + usage" in page  # overage merges with the default; rates stay in plans.py
     mp.setenv("PRODUCT_PLANS", '{"starter": {"currency": "<script>alert(1)</script>"}}')
     assert "<script>alert(1)" not in c.get("/pricing").text
 

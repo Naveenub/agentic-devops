@@ -126,3 +126,24 @@ def test_admin_drift_endpoint(tmp_path, monkeypatch):
     assert c.get("/admin/billing/drift").status_code == 401
     r = c.get("/admin/billing/drift", headers={"x-admin-key": "adm"}).json()
     assert r["in_sync"] is False and any("missing" in d for d in r["drift"])
+
+
+def test_seat_price_is_a_flat_licensed_price_flagged_in_the_env(monkeypatch):
+    api = FakeStripe()
+    drift, env = stripe_sync.sync(apply=True, api=api)
+    assert "agentic_pro_seat: missing" in drift and "agentic_starter_seat: missing" in drift
+    seat = next(p for p in api.prices if p["lookup_key"] == "agentic_pro_seat")
+    assert seat["unit_amount"] == 2500 and seat["billing_scheme"] == "per_unit" and seat["recurring"]["usage_type"] == "licensed"
+    assert env["STRIPE_PRICE_PRO"].count(":seat") == 1 and ":seat" in env["STRIPE_PRICE_STARTER"]
+    assert "free" not in {p["lookup_key"].split("_")[1] for p in api.prices}  # no seat price for a plan without seat_cents
+    assert stripe_sync.sync(apply=False, api=api, environ=_env_for(env))[0] == []
+    # the env the sync prints is what checkout and the seat sync read back
+    from product import subscriptions
+    monkeypatch.setenv("STRIPE_PRICE_PRO", env["STRIPE_PRICE_PRO"])
+    seat_id = next(p["id"] for p in api.prices if p["lookup_key"] == "agentic_pro_seat")
+    assert subscriptions.seat_price("pro") == seat_id and seat_id not in [pid for pid, _ in subscriptions.prices_for("pro")]
+    assert subscriptions.plan_for_prices([seat_id]) is None  # the seat price alone never decides the plan
+    monkeypatch.setenv("PRODUCT_PLANS", '{"pro": {"seat_cents": 3000}}')
+    assert stripe_sync.sync(apply=False, api=api, environ=_env_for(env))[0] == ["agentic_pro_seat: amount 2500 != 3000"]
+    monkeypatch.setenv("PRODUCT_PLANS", '{"pro": {"seat_cents": null}}')  # seats switched off for the plan
+    assert "agentic_pro_seat" not in [i["key"] for i in stripe_sync.desired()]

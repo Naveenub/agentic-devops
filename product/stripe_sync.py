@@ -3,8 +3,9 @@
   python -m product.stripe_sync            check only: prints drift, exit 1 if Stripe differs from plans.py
   python -m product.stripe_sync --apply    create/replace what is missing or different, print the env to set
 
-Per paid plan this manages one flat monthly price (`agentic_<plan>_base`) and, for every metered event with an
-overage rate, one graduated-tier price (`agentic_<plan>_<event>`): first tier = the plan's included quota at 0,
+Per paid plan this manages one flat monthly price (`agentic_<plan>_base`), when the plan has `seat_cents` one flat
+per-member price (`agentic_<plan>_seat`, a licensed price whose quantity is the tenant's active member count) and, for
+every metered event with an overage rate, one graduated-tier price (`agentic_<plan>_<event>`): first tier = the plan's included quota at 0,
 second tier = the overage rate. Stripe prices are immutable, so a changed price/quota creates a new price and moves
 the lookup key to it; existing subscribers keep the old price until you migrate them. Meters are created once per
 event (METERS). Safe to re-run: everything is found by lookup key / event name. GET /admin/billing/drift runs the check.
@@ -49,6 +50,9 @@ def desired(plans: dict | None = None) -> list[dict]:
             continue
         items.append({"key": f"agentic_{p.name}_base", "plan": p.name, "event": None, "amount": p.base_cents,
                       "currency": p.currency.lower()})
+        if p.seat_cents:
+            items.append({"key": f"agentic_{p.name}_seat", "plan": p.name, "event": None, "seat": True,
+                          "amount": p.seat_cents, "currency": p.currency.lower()})
         for ev, (quota, rate) in p.billed_events().items():
             items.append({"key": f"agentic_{p.name}_{ev}", "plan": p.name, "event": ev, "quota": quota,
                           "rate": rate, "currency": p.currency.lower()})
@@ -87,6 +91,8 @@ def problems(item: dict, price: dict, meter_ids: dict) -> list[str]:
 def _form(item: dict, product: str, meter_ids: dict) -> dict:
     f = {"product": product, "currency": item["currency"], "lookup_key": item["key"], "transfer_lookup_key": "true",
          "recurring[interval]": "month", "metadata[plan]": item["plan"]}
+    if item.get("seat"):
+        f["metadata[kind]"] = "seat"
     if item["event"] is None:
         return {**f, "unit_amount": str(item["amount"])}
     f.update({"billing_scheme": "tiered", "tiers_mode": "graduated", "recurring[usage_type]": "metered",
@@ -140,11 +146,12 @@ def sync(apply: bool = False, api=None, plans: dict | None = None, environ=None)
                 tag = hashlib.sha256(repr(sorted(form.items())).encode()).hexdigest()[:16]
                 price = _ok(api("POST", "/prices", form, idem=f"price-{it['key']}-{tag}"))
         if price:
-            found.setdefault(it["plan"], []).append((price["id"], it["event"] is not None))
+            found.setdefault(it["plan"], []).append((price["id"], ":seat" if it.get("seat") else
+                                                    ":metered" if it["event"] is not None else ""))
     env = {f"STRIPE_METER_{e.upper()}": METERS[e] for e in sorted(meter_ids)}
     for plan, rows in found.items():
         var = f"STRIPE_PRICE_{plan.upper()}"
-        env[var] = ",".join(pid + (":metered" if m else "") for pid, m in rows)
+        env[var] = ",".join(pid + suffix for pid, suffix in rows)
         complete = len(rows) == sum(1 for i in items if i["plan"] == plan)
         if not apply and complete and sorted(environ.get(var, "").split(",")) != sorted(env[var].split(",")):
             drift.append(f"{var} is {environ.get(var) or 'unset'}, catalog resolves to {env[var]}")

@@ -57,9 +57,14 @@ def main() -> int:
     """`python -m product.billing`: one report run, for an external scheduler (cron, a Kubernetes CronJob)
     if you prefer that to PRODUCT_BILLING_INTERVAL. Prints the counts; exit status 1 if any batch failed."""
     import json
+
+    from product import subscriptions
     result = report_usage()
+    seats = subscriptions.reconcile_seats()
+    if seats.get("seats_synced") or seats.get("seats_failed"):
+        result = {**result, **seats}
     print(json.dumps(result))
-    return 1 if result.get("failed") else 0
+    return 1 if result.get("failed") or result.get("seats_failed") else 0
 
 
 if __name__ == "__main__":

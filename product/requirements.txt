@@ -1,2 +1,5 @@
 # Only needed when PRODUCT_DB is a postgresql:// URL (SQLite needs nothing extra).
 psycopg[binary,pool]>=3.2
+# Only needed for per-tenant OIDC single sign-on (PRODUCT_SECRET_KEY): ID token verification and client-secret encryption.
+pyjwt[crypto]>=2.8
+cryptography>=42

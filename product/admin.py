@@ -4,7 +4,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from product import billing, metering, store, stripe_sync, subscriptions
-from product.auth import current_tenant, require_admin
+from product.auth import current_principal, current_tenant, require_admin
 
 def require_enabled() -> None:
     if not os.getenv("PRODUCT_DB"):
@@ -110,6 +110,12 @@ def report():
     return billing.report_usage()
 
 
+@admin.post("/billing/seats")
+def reconcile_seats():
+    """Push every paid tenant's active member count to Stripe where it differs from what was last billed."""
+    return _stripe(subscriptions.reconcile_seats)
+
+
 @admin.get("/billing/drift")
 def billing_drift():
     """Stripe meters/prices vs product/plans.py. Empty list = in sync; fix with `python -m product.stripe_sync --apply`."""
@@ -118,8 +124,8 @@ def billing_drift():
 
 
 @tenant_router.get("/usage")
-def my_usage(tenant: dict = Depends(current_tenant)):
-    return metering.summary(tenant)
+def my_usage(p: dict = Depends(current_principal)):
+    return metering.summary(p["tenant"])
 
 
 def _stripe(fn, *a, **kw):

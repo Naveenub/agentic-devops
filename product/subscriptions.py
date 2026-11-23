@@ -3,8 +3,11 @@ Plain httpx against the Stripe REST API (same style as billing.py); no SDK.
 
   STRIPE_SECRET_KEY        required for every call here
   STRIPE_WEBHOOK_SECRET    endpoint signing secret (whsec_...); unset = POST /stripe/webhook returns 503
-  STRIPE_PRICE_<PLAN>      Checkout price id(s) for a paid plan, comma-separated, e.g. STRIPE_PRICE_PRO=price_base,price_usage:metered
-                           A ":metered" suffix marks usage-based prices (Checkout takes no quantity for them).
+  STRIPE_PRICE_<PLAN>      Checkout price id(s) for a paid plan, comma-separated, e.g. STRIPE_PRICE_PRO=price_base,price_usage:metered,price_seat:seat
+                           A ":metered" suffix marks usage-based prices (Checkout takes no quantity for them). A ":seat" suffix
+                           marks the per-member price: its quantity is the tenant's active member count, set at Checkout and
+                           kept current by sync_seats (a plan with seat_cents but no seat price cannot be bought, so seats are
+                           never silently free).
   STRIPE_SUCCESS_URL / STRIPE_CANCEL_URL / STRIPE_PORTAL_RETURN_URL   where Stripe sends the customer back
 
 Lifecycle policy: a subscription that is active/trialing puts the tenant on the plan its price maps to.
@@ -14,6 +17,7 @@ canceled, unpaid and incomplete_expired also drop to `free` and clear the subscr
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 
@@ -22,6 +26,7 @@ import httpx
 from product import store
 from product.plans import get_plan
 
+log = logging.getLogger("product.subscriptions")
 API = "https://api.stripe.com/v1"
 TOLERANCE = 300  # seconds a webhook signature stays valid
 FALLBACK_PLAN = "free"
@@ -55,15 +60,25 @@ def _post(path: str, data: dict, idem: str | None = None, post=None) -> dict:
     return r.json()
 
 
-def prices_for(plan: str) -> list[tuple[str, bool]]:
-    """[(price_id, metered)] configured for a plan; empty when the plan is not purchasable."""
+def _price_entries(plan: str) -> list[tuple[str, str]]:
     out = []
     for part in os.getenv(f"STRIPE_PRICE_{plan.upper()}", "").split(","):
         part = part.strip()
         if part:
             pid, _, flag = part.partition(":")
-            out.append((pid, flag == "metered"))
+            out.append((pid, flag))
     return out
+
+
+def prices_for(plan: str) -> list[tuple[str, bool]]:
+    """[(price_id, metered)] for the plan's base and usage prices; empty when the plan is not purchasable.
+    The per-seat price is separate (seat_price): its quantity is not 1."""
+    return [(pid, flag == "metered") for pid, flag in _price_entries(plan) if flag != "seat"]
+
+
+def seat_price(plan: str) -> str | None:
+    """The Stripe price id of the plan's per-member price, if one is configured."""
+    return next((pid for pid, flag in _price_entries(plan) if flag == "seat"), None)
 
 
 def purchasable(plan: str) -> bool:
@@ -76,7 +91,7 @@ def plan_for_prices(price_ids: list[str]) -> str | None:
     for name in _load():
         if any(pid in price_ids for pid, _ in prices_for(name)):
             return name
-    return None
+    return None  # a seat price alone never identifies a plan: the base price does
 
 
 def ensure_customer(tenant: dict, post=None) -> str:
@@ -94,7 +109,10 @@ def create_checkout(tenant: dict, plan: str, success_url: str | None = None, can
     prices = prices_for(plan)
     if not prices:
         raise StripeError(f"plan {plan!r} cannot be purchased (no STRIPE_PRICE_{plan.upper()})", 422)
-    get_plan(plan)
+    seats = get_plan(plan).seat_cents
+    if seats and not seat_price(plan):
+        raise StripeError(f"plan {plan!r} charges per seat but STRIPE_PRICE_{plan.upper()} has no :seat price; "
+                          "run `python -m product.stripe_sync --apply` and set the env it prints", 422)
     if tenant.get("stripe_subscription_id") and tenant.get("subscription_status") not in DEAD:
         raise StripeError("tenant already has a subscription; change it through the billing portal", 409)
     cust = ensure_customer(tenant, post=post)
@@ -109,6 +127,9 @@ def create_checkout(tenant: dict, plan: str, success_url: str | None = None, can
         data[f"line_items[{i}][price]"] = pid
         if not metered:
             data[f"line_items[{i}][quantity]"] = "1"
+    if seats:  # one seat per active member (the owner included), so a team that already has members pays for them
+        data[f"line_items[{len(prices)}][price]"] = seat_price(plan)
+        data[f"line_items[{len(prices)}][quantity]"] = str(store.seat_count(tenant["id"]))
     return _post("/checkout/sessions", data, post=post)["url"]
 
 
@@ -164,12 +185,22 @@ def _apply_subscription(sub: dict) -> None:
             raise ValueError(f"subscription {sid} maps to unknown plan {plan!r}")
         fields.update(plan=plan, stripe_subscription_id=sid, subscription_status=status)
         store.update_tenant(t["id"], **fields)
+        store.set_seats_synced(t["id"], _seat_quantity(sub, plan))
     elif status in DEAD:
         _downgrade(t, status)
     else:  # past_due, incomplete, paused: record why; a failing payment loses the paid plan immediately
         if status == "past_due":
             fields["plan"] = FALLBACK_PLAN
         store.update_tenant(t["id"], stripe_subscription_id=sid, subscription_status=status, **fields)
+
+
+def _seat_quantity(sub: dict, plan: str) -> int | None:
+    """Quantity Stripe currently bills for the plan's seat price on this subscription; None if there is none."""
+    pid = seat_price(plan)
+    for item in (sub.get("items") or {}).get("data", []):
+        if pid and (item.get("price") or {}).get("id") == pid:
+            return item.get("quantity")
+    return None
 
 
 def _downgrade(t: dict, status: str) -> None:
@@ -246,3 +277,63 @@ def _fetch_subscription(sid: str) -> dict | None:
 
 def parse_event(body: bytes) -> dict:
     return json.loads(body)
+
+
+# ---- seats -------------------------------------------------------------------------------------------
+
+def sync_seats(tid: str, post=None) -> dict:
+    """Make Stripe bill the tenant's current active member count on the plan's seat price. Sets an absolute
+    quantity (never an increment), so it is idempotent and safe to repeat or to run from two places at once; it
+    re-reads the count after writing and goes round again if a member changed meanwhile. Changes are prorated.
+    Returns {"status": "synced"|"unchanged"|"skipped", ...}. Raises StripeError; callers that must not fail on
+    Stripe being down use sync_seats_quietly, and reconcile_seats retries what was missed."""
+    t = store.get_tenant(tid)
+    if not t or not os.getenv("STRIPE_SECRET_KEY"):
+        return {"status": "skipped", "reason": "no tenant or STRIPE_SECRET_KEY"}
+    sid = t.get("stripe_subscription_id")
+    pid = seat_price(t["plan"]) if get_plan(t["plan"]).seat_cents else None
+    if not sid or t.get("subscription_status") in DEAD or not pid:
+        return {"status": "skipped", "reason": "no subscription with a seat price"}
+    result = {"status": "unchanged"}
+    for _ in range(3):
+        want = store.seat_count(tid)
+        item = next((i for i in (_fetch_subscription(sid).get("items") or {}).get("data", [])
+                     if (i.get("price") or {}).get("id") == pid), None)
+        if item and item.get("quantity") == want:
+            store.set_seats_synced(tid, want)
+        else:
+            if item:
+                _post(f"/subscription_items/{item['id']}", {"quantity": str(want), "proration_behavior": "create_prorations"},
+                      post=post)
+            else:  # the subscription predates seat pricing (or a plan change dropped the item): add it
+                _post("/subscription_items", {"subscription": sid, "price": pid, "quantity": str(want),
+                                              "proration_behavior": "create_prorations"}, post=post)
+            store.set_seats_synced(tid, want)
+            result = {"status": "synced", "seats": want}
+        if store.seat_count(tid) == want:
+            return {**result, "seats": want}
+    return {**result, "seats": store.seat_count(tid), "note": "members were changing; reconcile will settle it"}
+
+
+def sync_seats_quietly(tid: str) -> None:
+    """For background tasks after a member change: the change has already committed, so a Stripe failure is
+    logged and left for reconcile_seats (seats_synced then differs from the member count)."""
+    try:
+        sync_seats(tid)
+    except Exception as e:  # noqa: BLE001 - network, Stripe and DB errors alike
+        log.warning("seat sync failed for %s: %s", tid, type(e).__name__)
+
+
+def reconcile_seats() -> dict:
+    """Re-sync every paid tenant whose billed seat count is not the member count. Run by the billing scheduler."""
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        return {"seats_synced": 0}
+    done = failed = 0
+    for d in store.seat_drift():
+        try:
+            r = sync_seats(d["tenant_id"])
+            done += r["status"] in ("synced", "unchanged")
+        except StripeError as e:
+            failed += 1
+            log.warning("seat reconcile failed for %s: %s", d["tenant_id"], e)
+    return {"seats_synced": done, "seats_failed": failed}

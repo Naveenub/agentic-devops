@@ -12,7 +12,9 @@
   GET  /terms /privacy /dpa /refunds   the legal documents (HTML, public; 503 until product/legal_docs/entity.json is
                     complete and COUNSEL_REVIEWED is true, see product/legal.py)
   GET  /account    paste your API key: usage, upgrade (Stripe Checkout) and "Manage billing" (Stripe portal)
-  GET  /billing    JSON state the account page renders (tenant auth, X-API-Key)
+  GET  /billing    JSON state the account page renders (X-API-Key, or a signed-in member's session)
+
+Members, invitations and SSO sign-in live in product/team.py (seat pricing: `seat_cents` in plans.py).
 
 Paying is the existing flow: /account calls POST /billing/checkout and POST /billing/portal.
 
@@ -40,7 +42,7 @@ from fastapi.responses import HTMLResponse
 
 from product import legal, mailer, store, subscriptions
 from product.admin import require_enabled
-from product.auth import current_tenant
+from product.auth import current_principal, current_tenant
 from product.plans import _load
 
 web_router = APIRouter(dependencies=[Depends(require_enabled)])
@@ -192,16 +194,19 @@ def recover_confirm(payload: dict):
 
 
 @web_router.get("/billing")
-def billing_state(tenant: dict = Depends(current_tenant)):
-    """What /account needs: the plan, the subscription state, and which paid plans can be bought right now."""
+def billing_state(p: dict = Depends(current_principal)):
+    """What /account needs: the plan, the subscription state, and which paid plans can be bought right now.
+    Checkout and the portal are API-key only, so a member's session sees the state but no buy/manage actions."""
+    tenant, via_key = p["tenant"], p["via"] == "key"
     has_sub = bool(tenant.get("stripe_subscription_id")) and tenant.get("subscription_status") not in subscriptions.DEAD
     return {
         "tenant": tenant["id"], "name": tenant["name"], "plan": tenant["plan"],
         "subscription_status": tenant.get("subscription_status"),
         "has_subscription": has_sub,
         "email_verified": bool(tenant.get("email_verified_at")),
-        "can_manage": bool(tenant.get("stripe_customer_id")),  # the portal needs a Stripe customer
-        "purchasable": [p.name for p in _ordered_plans() if subscriptions.purchasable(p.name)] if not has_sub else [],
+        "can_manage": via_key and bool(tenant.get("stripe_customer_id")),  # the portal needs a Stripe customer
+        "purchasable": [pl.name for pl in _ordered_plans() if subscriptions.purchasable(pl.name)] if not has_sub and via_key else [],
+        "via": p["via"], "role": p["role"],
     }
 
 
@@ -219,7 +224,7 @@ header b{margin-right:auto}a{color:var(--acc)}h1{font-size:1.9rem;margin:28px 0 
 .card ul{list-style:none;padding:0;margin:12px 0 18px;color:var(--mut);font-size:.93rem;flex:1}.card li{padding:3px 0}
 .btn,button{display:inline-block;font:inherit;background:var(--acc);color:var(--accfg);border:0;border-radius:8px;padding:9px 16px;cursor:pointer;text-decoration:none;text-align:center}
 .btn.alt,button.alt{background:transparent;color:var(--acc);border:1px solid var(--acc)}.btn[aria-disabled=true]{opacity:.5;pointer-events:none}
-input{font:inherit;width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
+input,select{font:inherit;width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
 label{display:block;font-weight:600;margin:14px 0 6px}.box{max-width:520px}.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
 code{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:2px 6px;word-break:break-all}
 label.chk{display:flex;gap:10px;align-items:flex-start;font-weight:400;margin-top:16px}label.chk input{width:auto;margin-top:5px}.msg{margin-top:14px;min-height:1.4em}.err{color:var(--bad)}.ok{color:var(--ok)}
@@ -400,21 +405,28 @@ $('copy').addEventListener('click',()=>{navigator.clipboard&&navigator.clipboard
 
 @web_router.get("/account", response_class=HTMLResponse)
 def account_page():
-    body = ('<h1>Account &amp; billing</h1><p class="lead">Paste your API key to see your plan and usage, upgrade, or manage billing.</p>'
+    body = ('<h1>Account &amp; billing</h1><p class="lead">Paste your API key (or sign in through the SSO link your team admin gave you) to see your plan and usage, upgrade, manage billing and manage your team.</p>'
             '<form id="kf" class="box"><label for="k">API key</label><input id="k" type="password" autocomplete="off" placeholder="adk_…">'
             '<div class="row"><button type="submit">Load account</button></div></form>'
             '<div id="msg" class="msg" role="status"></div>'
             '<section id="acct" hidden><h2 id="who"></h2><p>Plan: <b id="plan"></b> <span id="status"></span></p>'
             '<table><thead><tr><th>Usage this month</th><th>Used</th><th>Included</th></tr></thead><tbody id="usage"></tbody></table>'
-            '<div class="row" id="actions"></div></section>')
+            '<div class="row" id="actions"></div></section>'
+            '<section id="team" hidden><h2>Team</h2><p id="seatinfo" class="fine tight"></p>'
+            '<table><thead><tr><th>Member</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody id="members"></tbody></table>'
+            '<form id="invf" class="box" hidden><label for="iemail">Invite by email</label>'
+            '<input id="iemail" type="email" maxlength="254" required autocomplete="off">'
+            '<label for="irole">Role</label><select id="irole"><option value="member">member</option><option value="admin">admin</option></select>'
+            '<div class="row"><button type="submit">Send invitation</button></div></form></section>')
     script = """
 const $=id=>document.getElementById(id);
 const LABEL={analyze:'Analyze runs',cost_check:'Cost checks',llm_tokens:'LLM tokens'};
 let key='';try{key=sessionStorage.getItem('adk_key')||''}catch(e){}
 const params=new URLSearchParams(location.search);
 function say(t,cls){$('msg').className='msg '+(cls||'');$('msg').textContent=t}
-async function api(path,opts){
-  const r=await fetch(path,Object.assign({headers:{'x-api-key':key,'content-type':'application/json'}},opts||{}));
+async function api(path,opts){  // a signed-in member has no key: the session cookie goes along by itself
+  const h={'content-type':'application/json'};if(key)h['x-api-key']=key;
+  const r=await fetch(path,Object.assign({headers:h},opts||{}));
   const b=await r.json().catch(()=>({}));
   if(!r.ok)throw new Error(typeof b.detail==='string'?b.detail:'Request failed ('+r.status+')');
   return b;
@@ -426,8 +438,27 @@ async function go(path,body){
 }
 function btn(text,alt,fn){const b=document.createElement('button');b.type='button';b.textContent=text;if(alt)b.className='alt';b.onclick=fn;$('actions').appendChild(b)}
 function fmt(n){return n===null||n===undefined?'Unlimited':Number(n).toLocaleString()}
+function cell(tr,v){const td=document.createElement('td');td.textContent=v;tr.appendChild(td);return td}
+async function loadTeam(bill){
+  const m=await api('/members'),tb=$('members'),mgr=bill.role==='owner'||bill.role==='admin';
+  tb.textContent='';
+  for(const x of m.members){
+    const tr=document.createElement('tr');cell(tr,x.email);cell(tr,x.role);cell(tr,x.status+(x.sso_linked?' (SSO)':''));
+    const td=cell(tr,'');
+    if(mgr){const b=document.createElement('button');b.type='button';b.className='alt';b.textContent='Remove';
+      b.onclick=async()=>{try{await api('/members/'+x.id,{method:'DELETE'});await loadTeam(bill)}catch(e){say(e.message,'err')}};td.appendChild(b)}
+    tb.appendChild(tr);
+  }
+  const s=m.seats,price=s.price_cents?' at '+(s.price_cents/100).toFixed(2)+' '+s.currency.toUpperCase()+' each per month':'';
+  $('seatinfo').textContent='Billed seats: '+s.billed+price+(s.max?' (plan allows '+s.max+')':'');
+  $('invf').hidden=!mgr;$('team').hidden=false;
+}
+$('invf').addEventListener('submit',async ev=>{
+  ev.preventDefault();say('Sending…');
+  try{await api('/members',{method:'POST',body:JSON.stringify({email:$('iemail').value,role:$('irole').value})});
+    $('iemail').value='';say('Invitation sent.','ok');await loadTeam(await api('/billing'))}catch(e){say(e.message,'err')}
+});
 async function load(){
-  if(!key){return}
   say('Loading…');
   try{
     const [bill,use]=await Promise.all([api('/billing'),api('/usage')]);
@@ -443,11 +474,13 @@ async function load(){
     const back=location.origin+'/account';
     for(const p of bill.purchasable)btn('Upgrade to '+p,false,()=>go('/billing/checkout',{plan:p,success_url:back+'?checkout=success',cancel_url:back}));
     if(bill.can_manage)btn('Manage billing',true,()=>go('/billing/portal',{return_url:back}));
+    if(bill.via==='session')btn('Sign out',true,async()=>{await api('/logout',{method:'POST'});location.href='/account'});
     $('acct').hidden=false;say('');
+    try{await loadTeam(bill)}catch(e){}
     const up=params.get('upgrade');
     if(up&&bill.purchasable.includes(up)){history.replaceState(null,'',location.pathname);go('/billing/checkout',{plan:up,success_url:back+'?checkout=success',cancel_url:back})}
     else if(params.get('checkout')==='success'){say('Payment received. Your plan updates as soon as Stripe confirms it (usually seconds).','ok');setTimeout(()=>{params.delete('checkout');load()},4000)}
-  }catch(e){$('acct').hidden=true;say(e.message,'err')}
+  }catch(e){$('acct').hidden=true;$('team').hidden=true;say(key?e.message:'','err')}  // no key and no session: just show the key form
 }
 $('kf').addEventListener('submit',ev=>{ev.preventDefault();key=$('k').value.trim();try{sessionStorage.setItem('adk_key',key)}catch(e){}load()});
 load();

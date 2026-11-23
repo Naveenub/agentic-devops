@@ -10,7 +10,7 @@ import asyncio
 import logging
 import os
 
-from product import billing, store
+from product import billing, store, subscriptions
 
 JOB = "billing-report"
 log = logging.getLogger(__name__)
@@ -29,7 +29,9 @@ def run_due(every: float, report=None) -> dict | None:
     """Run the report if it is due and this caller wins the claim. Returns its counts, or None if not due."""
     if not store.claim_run(JOB, every):
         return None
-    return (report or billing.report_usage)()
+    result = (report or billing.report_usage)()
+    seats = subscriptions.reconcile_seats()  # also retries seat quantities a failed background sync left behind
+    return {**result, **seats} if seats.get("seats_synced") or seats.get("seats_failed") else result
 
 
 async def billing_forever(every: float, report=None) -> None:

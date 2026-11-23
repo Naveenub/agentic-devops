@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS tenants (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, plan TEXT NOT NULL DEFAULT 'free',
   stripe_customer_id TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
   stripe_subscription_id TEXT, subscription_status TEXT, email TEXT,
-  terms_version TEXT, terms_accepted_at REAL, email_verified_at REAL);
+  terms_version TEXT, terms_accepted_at REAL, email_verified_at REAL, seats_synced INTEGER);
 CREATE TABLE IF NOT EXISTS stripe_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, received_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS api_keys (
   key_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), prefix TEXT NOT NULL,
@@ -47,6 +47,23 @@ CREATE TABLE IF NOT EXISTS verify_tokens (
   created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
 CREATE INDEX IF NOT EXISTS verify_tokens_tenant ON verify_tokens(tenant_id, created_at);
 CREATE TABLE IF NOT EXISTS job_runs (name TEXT PRIMARY KEY, last_run REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS tenant_members (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), email TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'member', status TEXT NOT NULL DEFAULT 'invited', oidc_subject TEXT,
+  created_at REAL NOT NULL, accepted_at REAL, removed_at REAL);
+CREATE UNIQUE INDEX IF NOT EXISTS tenant_members_email_uq ON tenant_members(tenant_id, email);
+CREATE UNIQUE INDEX IF NOT EXISTS tenant_members_sub_uq ON tenant_members(tenant_id, oidc_subject);
+CREATE TABLE IF NOT EXISTS member_invites (
+  token_hash TEXT PRIMARY KEY, member_id TEXT NOT NULL REFERENCES tenant_members(id),
+  tenant_id TEXT NOT NULL REFERENCES tenants(id), created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
+CREATE INDEX IF NOT EXISTS member_invites_member ON member_invites(member_id);
+CREATE TABLE IF NOT EXISTS invite_hits (ip TEXT NOT NULL, ts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS invite_hits_ts ON invite_hits(ts);
+CREATE TABLE IF NOT EXISTS sso_hits (ip TEXT NOT NULL, ts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS sso_hits_ts ON sso_hits(ts);
+CREATE TABLE IF NOT EXISTS tenant_sso (
+  tenant_id TEXT PRIMARY KEY REFERENCES tenants(id), issuer TEXT NOT NULL, client_id TEXT NOT NULL,
+  client_secret_enc TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, updated_at REAL NOT NULL);
 """
 # PostgreSQL flavour of the same schema: 64-bit ids and counters, double-precision epoch seconds.
 PG_SCHEMA = (re.sub(r"\bREAL\b", "DOUBLE PRECISION",
@@ -55,10 +72,13 @@ PG_SCHEMA = (re.sub(r"\bREAL\b", "DOUBLE PRECISION",
              + "CREATE UNIQUE INDEX IF NOT EXISTS tenants_email_uq ON tenants(email);\n"
              "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS terms_version TEXT;\n"
              "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS terms_accepted_at DOUBLE PRECISION;\n"
-             "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS email_verified_at DOUBLE PRECISION;\n")
+             "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS email_verified_at DOUBLE PRECISION;\n"
+             "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS seats_synced BIGINT;\n")
 
 RECOVERY_TTL = 1800  # seconds a recovery link stays valid
 VERIFY_TTL = 86400  # seconds a verification link stays valid
+INVITE_TTL = 7 * 86400  # seconds a member invitation stays valid
+ROLES = ("owner", "admin", "member")
 RECOVERY_COOLDOWN = 600  # at most one recovery email per tenant in this window (stops mailbombing a registered address)
 
 
@@ -105,7 +125,8 @@ def _migrate(c) -> None:
     PostgreSQL databases are created from the current schema)."""
     have = {r[1] for r in c.execute("PRAGMA table_info(tenants)")}
     for col, typ in (("stripe_subscription_id", "TEXT"), ("subscription_status", "TEXT"), ("email", "TEXT"),
-                     ("terms_version", "TEXT"), ("terms_accepted_at", "REAL"), ("email_verified_at", "REAL")):
+                     ("terms_version", "TEXT"), ("terms_accepted_at", "REAL"), ("email_verified_at", "REAL"),
+                     ("seats_synced", "INTEGER")):
         if col not in have:
             try:
                 c.execute(f"ALTER TABLE tenants ADD COLUMN {col} {typ}")
@@ -215,11 +236,15 @@ def _reclaim_email(email: str, after: float) -> bool:
     the free plan with no subscription, and was sent a verification link (so it signed up while verification was
     on; older accounts are never touched). The holder keeps its keys, it just loses the address."""
     with conn(immediate=True, lock="reclaim:" + email) as c:
-        return c.execute(
+        freed = c.execute(
             "UPDATE tenants SET email=NULL WHERE email=? AND email_verified_at IS NULL AND plan='free' "
             "AND stripe_subscription_id IS NULL AND created_at<? "
             "AND EXISTS (SELECT 1 FROM verify_tokens v WHERE v.tenant_id=tenants.id)",
             (email, time.time() - after)).rowcount > 0
+        if freed:  # the squatter's owner seat carried that address too: it must not outlive the claim
+            c.execute("UPDATE tenant_members SET status='removed', removed_at=? WHERE email=? AND role='owner' "
+                      "AND tenant_id IN (SELECT id FROM tenants WHERE email IS NULL)", (time.time(), email))
+        return freed
 
 
 def create_tenant(name: str, plan: str = "free", email: str | None = None, terms_version: str | None = None,
@@ -274,6 +299,12 @@ def tenant_for_customer(customer_id: str) -> dict | None:
     with conn() as c:
         r = c.execute("SELECT * FROM tenants WHERE stripe_customer_id=?", (customer_id,)).fetchone()
     return dict(r) if r else None
+
+
+def set_seats_synced(tid: str, n: int | None) -> None:
+    """The seat quantity Stripe is known to bill (None = unknown); update_tenant cannot store None."""
+    with conn() as c:
+        c.execute("UPDATE tenants SET seats_synced=? WHERE id=?", (n, tid))
 
 
 def clear_subscription(tid: str, status: str) -> None:
@@ -480,3 +511,274 @@ def claim_run(name: str, interval: float) -> bool:
         c.execute("INSERT INTO job_runs(name,last_run) VALUES(?,?) "
                   "ON CONFLICT(name) DO UPDATE SET last_run=excluded.last_run", (name, now))
         return True
+
+
+# ---- tenant members (seats) --------------------------------------------------------------------------
+#
+# A seat is an active row in tenant_members. Pending invitations hold a place against the plan's max_seats but are
+# not billed until accepted. Removal keeps the row (status 'removed') so the audit trail and the SSO subject
+# binding survive a re-invite. API keys stay tenant-level: they act as the tenant's owner and are not seats.
+
+class SeatLimit(Exception):
+    """The plan's max_seats would be exceeded."""
+
+
+class MemberError(Exception):
+    """A refused member change; the message is safe to show to the caller."""
+
+
+def _member(r) -> dict:
+    d = dict(r)
+    d.pop("oidc_subject", None)  # an IdP subject is internal; callers only learn whether the member is bound
+    d["sso_linked"] = bool(r["oidc_subject"])
+    return d
+
+
+def ensure_owner(tid: str) -> None:
+    """Tenants predate members: give the tenant's signup email an owner seat the first time anyone looks. The
+    owner counts as a seat, and is active at once (the tenant's own email was the signup identity)."""
+    with conn() as c:  # the common case is "already there": no write lock for that
+        if c.execute("SELECT 1 FROM tenant_members WHERE tenant_id=? AND role='owner'", (tid,)).fetchone():
+            return
+    with conn(immediate=True, lock=f"members:{tid}") as c:
+        if c.execute("SELECT 1 FROM tenant_members WHERE tenant_id=? AND role='owner'", (tid,)).fetchone():
+            return
+        t = c.execute("SELECT email FROM tenants WHERE id=?", (tid,)).fetchone()
+        if not t or not t["email"]:
+            return
+        now = time.time()
+        c.execute("INSERT INTO tenant_members(id,tenant_id,email,role,status,created_at,accepted_at) "
+                  "VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant_id,email) DO NOTHING",
+                  ("mem_" + secrets.token_hex(8), tid, t["email"], "owner", "active", now, now))
+
+
+def list_members(tid: str) -> list[dict]:
+    ensure_owner(tid)
+    with conn() as c:
+        rows = c.execute("SELECT * FROM tenant_members WHERE tenant_id=? AND status!='removed' ORDER BY created_at, id",
+                         (tid,)).fetchall()
+    return [_member(r) for r in rows]
+
+
+def get_member(tid: str, mid: str) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM tenant_members WHERE tenant_id=? AND id=?", (tid, mid)).fetchone()
+    return _member(r) if r else None
+
+
+def seat_count(tid: str) -> int:
+    """Active members: what Stripe bills. Never below 1, because a tenant with no member rows (operator-created,
+    no email) still has its owner using the API keys."""
+    ensure_owner(tid)
+    with conn() as c:
+        n = c.execute("SELECT COUNT(*) FROM tenant_members WHERE tenant_id=? AND status='active'", (tid,)).fetchone()[0]
+    return max(1, n)
+
+
+def active_members(tid: str) -> int:
+    """Raw count of active members (seat_count is never below 1)."""
+    with conn() as c:
+        return c.execute("SELECT COUNT(*) FROM tenant_members WHERE tenant_id=? AND status='active'", (tid,)).fetchone()[0]
+
+
+def _held(c, tid: str, now: float) -> int:
+    """Active members plus invitations still open: what max_seats limits."""
+    return c.execute(
+        "SELECT COUNT(*) FROM tenant_members m WHERE m.tenant_id=? AND (m.status='active' OR (m.status='invited' AND "
+        "EXISTS (SELECT 1 FROM member_invites i WHERE i.member_id=m.id AND i.used_at IS NULL AND i.expires_at>?)))",
+        (tid, now)).fetchone()[0]
+
+
+def invite_member(tid: str, email: str, role: str, max_seats: int | None) -> tuple[dict, str]:
+    """Create (or re-open) a pending member and a single-use invitation token (plaintext returned once, only its
+    hash stored). Raises MemberError (already a member, bad role, cooldown) or SeatLimit."""
+    if role not in ROLES or role == "owner":
+        raise MemberError("'role' must be 'admin' or 'member'")
+    ensure_owner(tid)
+    now = time.time()
+    token = secrets.token_urlsafe(32)
+    with conn(immediate=True, lock=f"members:{tid}") as c:
+        m = c.execute("SELECT * FROM tenant_members WHERE tenant_id=? AND email=?", (tid, email)).fetchone()
+        if m and m["status"] == "active":
+            raise MemberError("that person is already a member")
+        if m and c.execute("SELECT 1 FROM member_invites WHERE member_id=? AND created_at>?",
+                           (m["id"], now - RECOVERY_COOLDOWN)).fetchone():
+            raise MemberError("an invitation was just sent to that address; wait a few minutes before sending another")
+        if not (m and m["status"] == "invited" and c.execute(  # re-sending an open invite does not take a second place
+                "SELECT 1 FROM member_invites WHERE member_id=? AND used_at IS NULL AND expires_at>?",
+                (m["id"], now)).fetchone()):
+            if max_seats is not None and _held(c, tid, now) >= max_seats:
+                raise SeatLimit(max_seats)
+        if m:
+            mid = m["id"]
+            c.execute("UPDATE tenant_members SET role=?, status='invited', removed_at=NULL WHERE id=?", (role, mid))
+        else:
+            mid = "mem_" + secrets.token_hex(8)
+            c.execute("INSERT INTO tenant_members(id,tenant_id,email,role,status,created_at) VALUES(?,?,?,?,?,?)",
+                      (mid, tid, email, role, "invited", now))
+        c.execute("DELETE FROM member_invites WHERE member_id=? OR expires_at<=?", (mid, now))
+        c.execute("INSERT INTO member_invites(token_hash,member_id,tenant_id,created_at,expires_at) VALUES(?,?,?,?,?)",
+                  (hash_key(token), mid, tid, now, now + INVITE_TTL))
+        member = _member(c.execute("SELECT * FROM tenant_members WHERE id=?", (mid,)).fetchone())
+    return member, token
+
+
+def _activate(c, m, now: float, max_seats: int | None, subject: str | None = None) -> None:
+    """Turn an invited member active inside the caller's transaction. Re-checks the cap, because the plan may
+    have changed since the invitation was sent; an invitation's own place is already counted, so it is excluded."""
+    if max_seats is not None:
+        active = c.execute("SELECT COUNT(*) FROM tenant_members WHERE tenant_id=? AND status='active'",
+                           (m["tenant_id"],)).fetchone()[0]
+        if active >= max_seats:
+            raise SeatLimit(max_seats)
+    c.execute("UPDATE tenant_members SET status='active', accepted_at=?, removed_at=NULL, "
+              "oidc_subject=COALESCE(oidc_subject, ?) WHERE id=?", (now, subject, m["id"]))
+    c.execute("UPDATE member_invites SET used_at=? WHERE member_id=? AND used_at IS NULL", (now, m["id"]))
+
+
+def redeem_invite(token: str, max_seats_for) -> dict | None:
+    """Spend an invitation: the member becomes active (opening the mailed link proves the mailbox). None if the
+    token is unknown, used or expired, or the tenant is inactive. `max_seats_for(tenant_row)` gives the cap for the
+    tenant's current plan. Raises SeatLimit."""
+    now = time.time()
+    with conn(immediate=True, lock="invite-redeem:" + hash_key(token)) as c:
+        r = c.execute("SELECT i.member_id, i.tenant_id FROM member_invites i JOIN tenants t ON t.id=i.tenant_id "
+                      "WHERE i.token_hash=? AND i.used_at IS NULL AND i.expires_at>? AND t.active=1",
+                      (hash_key(token), now)).fetchone()
+        if not r:
+            return None
+        m = c.execute("SELECT * FROM tenant_members WHERE id=?", (r["member_id"],)).fetchone()
+        if not m or m["status"] == "removed":
+            return None
+        if m["status"] != "active":
+            t = c.execute("SELECT * FROM tenants WHERE id=?", (r["tenant_id"],)).fetchone()
+            _activate(c, m, now, max_seats_for(dict(t)))
+        else:
+            c.execute("UPDATE member_invites SET used_at=? WHERE member_id=? AND used_at IS NULL", (now, m["id"]))
+        return _member(c.execute("SELECT * FROM tenant_members WHERE id=?", (m["id"],)).fetchone())
+
+
+def remove_member(tid: str, mid: str) -> dict | None:
+    """Soft-remove: the member loses their seat and every session at once (sessions are re-checked against this
+    row). The last owner cannot be removed. Returns the member, or None if there is no such member."""
+    now = time.time()
+    with conn(immediate=True, lock=f"members:{tid}") as c:
+        m = c.execute("SELECT * FROM tenant_members WHERE tenant_id=? AND id=? AND status!='removed'", (tid, mid)).fetchone()
+        if not m:
+            return None
+        if m["role"] == "owner" and m["status"] == "active" and c.execute(
+                "SELECT COUNT(*) FROM tenant_members WHERE tenant_id=? AND role='owner' AND status='active'",
+                (tid,)).fetchone()[0] <= 1:
+            raise MemberError("a tenant needs at least one owner")
+        c.execute("UPDATE tenant_members SET status='removed', removed_at=? WHERE id=?", (now, mid))
+        c.execute("DELETE FROM member_invites WHERE member_id=?", (mid,))
+        return _member(c.execute("SELECT * FROM tenant_members WHERE id=?", (mid,)).fetchone())
+
+
+def set_member_role(tid: str, mid: str, role: str) -> dict | None:
+    if role not in ROLES:
+        raise MemberError("'role' must be one of owner, admin, member")
+    with conn(immediate=True, lock=f"members:{tid}") as c:
+        m = c.execute("SELECT * FROM tenant_members WHERE tenant_id=? AND id=? AND status!='removed'", (tid, mid)).fetchone()
+        if not m:
+            return None
+        if m["role"] == "owner" and role != "owner" and m["status"] == "active" and c.execute(
+                "SELECT COUNT(*) FROM tenant_members WHERE tenant_id=? AND role='owner' AND status='active'",
+                (tid,)).fetchone()[0] <= 1:
+            raise MemberError("a tenant needs at least one owner")
+        c.execute("UPDATE tenant_members SET role=? WHERE id=?", (role, mid))
+        return _member(c.execute("SELECT * FROM tenant_members WHERE id=?", (mid,)).fetchone())
+
+
+def sso_member(tid: str, subject: str, email: str | None, max_seats_for) -> dict | None:
+    """The member an OIDC login stands for, or None. A member already bound to this IdP subject matches on the
+    subject alone (their email at the IdP may change). Otherwise an *invited or active* member with the same
+    email and no subject yet is bound to it, and an invited one becomes active: the IdP vouched for the mailbox,
+    which is what the emailed link would have proved. Nobody is created here: SSO never adds seats by itself.
+    Raises SeatLimit when activating would pass the plan's cap."""
+    now = time.time()
+    with conn(immediate=True, lock=f"members:{tid}") as c:
+        m = c.execute("SELECT * FROM tenant_members WHERE tenant_id=? AND oidc_subject=?", (tid, subject)).fetchone()
+        if not m and email:
+            m = c.execute("SELECT * FROM tenant_members WHERE tenant_id=? AND email=? AND oidc_subject IS NULL "
+                          "AND status IN ('invited','active')", (tid, email)).fetchone()
+            if m and m["status"] == "invited" and not c.execute(
+                    "SELECT 1 FROM member_invites WHERE member_id=? AND used_at IS NULL AND expires_at>?",
+                    (m["id"], now)).fetchone():
+                m = None  # an expired invitation is not an invitation
+        if not m or m["status"] == "removed":
+            return None
+        if m["status"] == "invited":
+            t = c.execute("SELECT * FROM tenants WHERE id=?", (tid,)).fetchone()
+            _activate(c, m, now, max_seats_for(dict(t)), subject)
+        elif not m["oidc_subject"]:
+            c.execute("UPDATE tenant_members SET oidc_subject=? WHERE id=?", (subject, m["id"]))
+        return _member(c.execute("SELECT * FROM tenant_members WHERE id=?", (m["id"],)).fetchone())
+
+
+def invite_hit(tid: str, per_tenant_hour: int, per_day: int) -> bool:
+    """Anti-abuse for invitation email: a tenant cannot make us mail arbitrary addresses without limit."""
+    return _hit("invite_hits", tid, per_tenant_hour, per_day)
+
+
+def sso_hit(ip: str, per_ip_hour: int, per_day: int) -> bool:
+    """Limiter for the public SSO login endpoint, which makes this server fetch a tenant-chosen URL."""
+    return _hit("sso_hits", ip, per_ip_hour, per_day)
+
+
+# ---- per-tenant OIDC configuration -----------------------------------------------------------------
+
+def get_sso(tid: str) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM tenant_sso WHERE tenant_id=?", (tid,)).fetchone()
+    return dict(r) if r else None
+
+
+def put_sso(tid: str, issuer: str, client_id: str, client_secret_enc: str, enabled: bool = True) -> None:
+    """Save the tenant's IdP. Subjects are only meaningful for one issuer and client (Entra's `sub` differs per
+    application), so changing either unbinds every member: each is matched by email again at their next login."""
+    with conn(immediate=True, lock=f"members:{tid}") as c:
+        old = c.execute("SELECT issuer, client_id FROM tenant_sso WHERE tenant_id=?", (tid,)).fetchone()
+        if old and (old["issuer"], old["client_id"]) != (issuer, client_id):
+            c.execute("UPDATE tenant_members SET oidc_subject=NULL WHERE tenant_id=?", (tid,))
+        c.execute("INSERT INTO tenant_sso(tenant_id,issuer,client_id,client_secret_enc,enabled,updated_at) "
+                  "VALUES(?,?,?,?,?,?) ON CONFLICT(tenant_id) DO UPDATE SET issuer=excluded.issuer, "
+                  "client_id=excluded.client_id, client_secret_enc=excluded.client_secret_enc, "
+                  "enabled=excluded.enabled, updated_at=excluded.updated_at",
+                  (tid, issuer, client_id, client_secret_enc, 1 if enabled else 0, time.time()))
+
+
+def set_sso_enabled(tid: str, enabled: bool) -> bool:
+    with conn() as c:
+        return c.execute("UPDATE tenant_sso SET enabled=?, updated_at=? WHERE tenant_id=?",
+                         (1 if enabled else 0, time.time(), tid)).rowcount > 0
+
+
+def delete_sso(tid: str) -> int:
+    with conn() as c:
+        return c.execute("DELETE FROM tenant_sso WHERE tenant_id=?", (tid,)).rowcount
+
+
+def live_member(tid: str, mid: str) -> dict | None:
+    """The member if still active and the tenant is too: what a session is re-checked against on every request."""
+    with conn() as c:
+        r = c.execute("SELECT m.* FROM tenant_members m JOIN tenants t ON t.id=m.tenant_id "
+                      "WHERE m.id=? AND m.tenant_id=? AND m.status='active' AND t.active=1", (mid, tid)).fetchone()
+    return _member(r) if r else None
+
+
+def seat_drift() -> list[dict]:
+    """Subscribed tenants on a per-seat plan whose last-synced seat count differs from the current one (or was
+    never synced)."""
+    from product.plans import get_plan
+    with conn() as c:
+        rows = c.execute("SELECT id, plan, seats_synced FROM tenants WHERE stripe_subscription_id IS NOT NULL "
+                         "AND active=1").fetchall()
+    out = []
+    for r in rows:
+        if not get_plan(r["plan"]).seat_cents:  # seats are not billed on this plan: nothing to keep in step
+            continue
+        n = seat_count(r["id"])
+        if r["seats_synced"] != n:
+            out.append({"tenant_id": r["id"], "synced": r["seats_synced"], "actual": n})
+    return out

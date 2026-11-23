@@ -9,6 +9,12 @@ GET /admin/billing/drift), so a plan is never defined in two places. Quotas are 
                refused with HTTP 429. None = no cap.
   overage      event -> price per unit past the included quota, in minor units (decimal string, e.g. "0.0002"
                cents per LLM token = $2 per 1M tokens). Events without a rate are not billed.
+  seat_cents   monthly price per active tenant member (a seat = an active row in tenant_members, owner included),
+               in minor units; billed on top of base_cents as a Stripe licensed price whose quantity follows the
+               member count (product/subscriptions.sync_seats). None = seats are not billed on this plan.
+  max_seats    hard cap on active + invited members; invites past it are refused (HTTP 402). None = no cap.
+  sso          may configure OIDC single sign-on (PUT /sso). Off by default: the IdP URL is tenant-supplied and this
+               server fetches it, so it is not offered to every free signup.
 
 Override any value without code via PRODUCT_PLANS (JSON); re-run the sync after changing prices or quotas."""
 import json
@@ -47,6 +53,9 @@ class Plan:
     currency: str = "usd"
     overage: dict = field(default_factory=dict)  # event -> minor units per unit past the quota (decimal string)
     spend_cap_cents: int | None = None  # max monthly overage charge (minor units); None = uncapped
+    seat_cents: int | None = None  # monthly price per active member (minor units); None = seats not billed
+    max_seats: int | None = None  # cap on active + pending members; None = no cap
+    sso: bool = False  # may configure OIDC single sign-on
 
     def overage_cents(self, used: dict) -> Decimal:
         """Overage charge, in minor units, for this month's usage (event -> units)."""
@@ -59,6 +68,8 @@ class Plan:
         if self.base_cents is None:
             return ""
         label = money(self.base_cents, self.currency) + (" / month" if self.base_cents else "")
+        if self.seat_cents:
+            label += f" + {money(self.seat_cents, self.currency)} / seat"
         return label + (" + usage" if self.billed_events() else "")
 
     def billed_events(self) -> dict:
@@ -69,15 +80,16 @@ class Plan:
 
 # PLACEHOLDER PRICES AND SPEND CAPS: set the real ones here, then run `make stripe-sync`.
 PLANS = {
-    "free": Plan("free", {"analyze": 50, "cost_check": 0, "llm_tokens": 100_000}, 10, hard_limit=True, base_cents=0),
+    "free": Plan("free", {"analyze": 50, "cost_check": 0, "llm_tokens": 100_000}, 10, hard_limit=True, base_cents=0,
+                 max_seats=1),
     "starter": Plan("starter", {"analyze": 1_000, "cost_check": 100, "llm_tokens": 2_000_000}, 60, cost_checks=True,
-                    base_cents=4900, spend_cap_cents=10_000,
+                    base_cents=4900, spend_cap_cents=10_000, seat_cents=1500, max_seats=10,
                     overage={"analyze": "5", "cost_check": "5", "llm_tokens": "0.0002"}),
     "pro": Plan("pro", {"analyze": 10_000, "cost_check": 1_000, "llm_tokens": 20_000_000}, 300, cost_checks=True,
-                base_cents=9900, spend_cap_cents=50_000,
+                base_cents=9900, spend_cap_cents=50_000, seat_cents=2500, sso=True,
                 overage={"analyze": "3", "cost_check": "3", "llm_tokens": "0.00015"}),
     "enterprise": Plan("enterprise", {"analyze": None, "cost_check": None, "llm_tokens": None}, 1_000,
-                       cost_checks=True),
+                       cost_checks=True, sso=True),
 }
 
 
@@ -96,6 +108,9 @@ def _load() -> dict:
                               hard_limit=cfg.get("hard_limit", base.hard_limit),
                               base_cents=cfg.get("base_cents", base.base_cents),
                               spend_cap_cents=cfg.get("spend_cap_cents", base.spend_cap_cents),
+                              seat_cents=cfg.get("seat_cents", base.seat_cents),
+                              max_seats=cfg.get("max_seats", base.max_seats),
+                              sso=cfg.get("sso", base.sso),
                               currency=str(cfg.get("currency", base.currency)),
                               overage={**base.overage, **{k: str(v) for k, v in cfg.get("overage", {}).items()}})
     return plans
