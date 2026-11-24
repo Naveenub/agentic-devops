@@ -207,6 +207,13 @@ def test_docs_are_off_and_healthz_is_open(api):
     assert bare.get("/healthz").json() == {"ok": True}
 
 
+def test_root_and_favicon_do_not_404(api):
+    bare = TestClient(api[0].app)
+    assert bare.get("/").status_code == 200
+    assert bare.get("/").json()["ok"] is True
+    assert bare.get("/favicon.ico").status_code == 204
+
+
 def test_slack_command_rejects_bad_signature_stale_ts_and_missing_secret(api):
     client, sent, mp = api
     body = {"text": "pod exit code 137", "channel_id": "C9"}
