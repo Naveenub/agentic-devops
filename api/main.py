@@ -8,7 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response
 
 from agent import approvals, executor, llm
 from agent.cost_watch import check_cost, parse_watch, watch_forever
@@ -120,6 +120,17 @@ def _gate_cost_check(tenant: dict | None) -> None:
 
     if not can_cost_check(tenant):
         raise HTTPException(status_code=403, detail=f"cost checks not available on plan '{tenant['plan']}'")
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    """Landing route so opening http://localhost:8000 in a browser doesn't 404. Reveals no API surface."""
+    return {"service": "devops-ai-agent", "ok": True}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
 
 
 @app.get("/healthz")
