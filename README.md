@@ -13,7 +13,7 @@ This agent acts like a **junior SRE that never sleeps**:
 * 🔍 Observes real infrastructure (Kubernetes, CI logs)
 * 🧠 Diagnoses failures using LLM reasoning + past incidents
 * 🛠️ Suggests exact fixes (commands, YAML, config changes)
-* 🧱 Stays **read-only and safe by default**
+* 🧱 Stays **read-only and safe by default**: the one write path is a human-approved pull request (see [Fix proposals](#️-fix-proposals-human-approval-then-a-pull-request))
 
 ❌ No auto-apply
 ❌ No destructive commands
@@ -27,16 +27,18 @@ This agent acts like a **junior SRE that never sleeps**:
 
 * Kubernetes failure diagnosis (CrashLoopBackOff, OOM, ImagePull, etc.)
 * GitHub Actions CI failure analysis and Terraform error parsing
+* Terraform drift analysis (`terraform plan` output)
 * AWS cost anomaly detection with Slack / PagerDuty alerts
+* Fix proposals that open one pull request, only after a human approves (never merges)
 * Incident memory using vector search (Chroma)
 * CLI, REST API and Slack slash-command interface
 * Docker-based one-command setup
 
 ### 🚫 Not Included (Yet)
 
-* Auto-remediation
-* Terraform apply
-* Production mutations
+* Auto-remediation without a human approval
+* Merging pull requests, `terraform apply`, any `kubectl` mutation
+* SAML and SCIM provisioning (OIDC SSO is included in the product layer)
 
 ---
 
@@ -104,7 +106,11 @@ The repository includes **realistic sample data** so the agent works out-of-the-
 
 ```
 agentic-devops/
-├── .github/workflows/eval.yml  # CI: tests, offline eval, report check
+├── .github/
+│   ├── workflows/eval.yml        # CI: tests, offline eval, report check, live eval, PostgreSQL tests
+│   ├── workflows/stripe-e2e.yml  # Stripe test-mode end to end (needs STRIPE_TEST_SECRET_KEY)
+│   ├── workflows/cla-gate.yml    # Blocks product/ PRs from authors without a signed CLA
+│   └── CLA-SIGNATORIES.txt
 ├── api/
 │   └── main.py                # FastAPI: /analyze, /cost/check, /slack/command, /healthz (+ product routes)
 ├── agent/
@@ -117,7 +123,8 @@ agentic-devops/
 │   ├── hallucination_eval.py
 │   ├── llm.py                 # OpenAI-compatible client + guardrails
 │   ├── orchestrator.py
-│   ├── executor.py          # approval-gated write path (propose / execute_approved)
+│   ├── approvals.py           # Human-approval store for fix proposals (SQLite)
+│   ├── executor.py            # approval-gated write path (propose / execute_approved)
 │   ├── real_case.py
 │   ├── report.py              # Synthetic incident report
 │   ├── signatures.py          # Regex failure signatures
@@ -132,6 +139,7 @@ agentic-devops/
 │   │   ├── aws_costs.py
 │   │   ├── kubernetes.py      # Safe kubectl wrapper (read-only)
 │   │   ├── github.py          # GitHub Actions log fetcher
+│   │   ├── github_pr.py       # Opens one PR for an approved fix (the only GitHub write)
 │   │   ├── slack.py
 │   │   └── terraform.py       # Terraform error parser
 │   └── memory/
@@ -139,6 +147,13 @@ agentic-devops/
 │       ├── ingest.py          # Runbook + incident ingestion
 │       └── retrieval.py       # Local (default) and Chroma retrievers
 ├── product/                   # Commercial layer (separate license, see LICENSING.md)
+│   ├── plans.py, store.py, auth.py, admin.py, metering.py, scheduler.py
+│   ├── billing.py, subscriptions.py, stripe_sync.py, stripe_e2e.py
+│   ├── team.py, sso.py        # Seats, invitations, OIDC SSO
+│   ├── web.py, mailer.py      # /pricing, /signup, /account, /recover; SMTP
+│   ├── legal.py, legal_docs/  # Terms, privacy, DPA, refunds + entity.json
+│   ├── unit_economics.py, pricing_evidence.json
+│   └── ship_gates.py          # Phase 0 gates in one command (make ship-gates)
 ├── data/
 │   ├── runbooks/              # Operational knowledge (RAG)
 │   ├── incidents/             # Historical incidents
@@ -152,8 +167,11 @@ agentic-devops/
 ├── docs/
 │   ├── demo/                  # Demo script + GIF
 │   └── screenshots/
+├── deploy/Caddyfile           # HTTPS reverse proxy for the hosted deployment
+├── CLA.md
 ├── .dockerignore
 ├── .env.example
+├── .env.production.example
 ├── .gitignore
 ├── Dockerfile
 ├── Dockerfile.product         # Commercial image (adds product/)
@@ -162,6 +180,7 @@ agentic-devops/
 ├── Makefile
 ├── docker-compose.yml
 ├── docker-compose.kube.yml    # Opt-in kubeconfig / AWS mounts for kubectl logs
+├── docker-compose.prod.yml    # Hosted: Caddy + api (product image) + PostgreSQL
 ├── pytest.ini
 ├── requirements.txt
 └── README.md
@@ -214,7 +233,7 @@ This MVP is **explicitly tailored** for real-world AWS-based DevOps environments
 | CI/CD         | GitHub Actions       | Terraform & deploy failures  |
 | Observability | CloudWatch / kubectl | Logs & metrics               |
 | Agent         | LangGraph            | Stateful reasoning           |
-| Memory        | ChromaDB             | Incident + runbook RAG       |
+| Memory        | Local retriever (default) or ChromaDB | Incident + runbook RAG |
 
 | Layer        | Technology                 |
 | ------------ | -------------------------- |
@@ -222,7 +241,7 @@ This MVP is **explicitly tailored** for real-world AWS-based DevOps environments
 | API          | FastAPI                    |
 | Agent        | LangGraph                  |
 | LLM          | OpenAI / LLaMA (pluggable) |
-| Memory       | ChromaDB                   |
+| Memory       | Local retriever / ChromaDB |
 | Infra Access | kubectl, GitHub API        |
 | Runtime      | Docker Compose             |
 
@@ -255,6 +274,8 @@ policy:
     - kubectl apply
     - kubectl delete
 ```
+
+**The one exception** is the approval-gated pull request: a proposal does nothing until a human holding a different key (`AGENT_APPROVER_KEY`) approves it, and only then does the agent open one PR on an allow-listed repo (`AGENT_PR_REPOS`) with a separate write token. It never merges, never pushes to the base branch and never touches `.github/`. Off unless `AGENT_APPROVALS_DB` is set.
 
 ---
 
@@ -481,8 +502,9 @@ This allows it to say:
 ## 🧪 Evaluation & Hallucination Detection
 
 See [Evaluation & Safety](#-evaluation--safety) above for the golden set, real-incident set and groundedness checks
-(`make eval`, `make live-eval`). Open items: human-in-the-loop validation and precision/recall on real incidents
-(`data/eval/real/`).
+(`make eval`, `make live-eval`). Open item: precision/recall on real incidents. `data/eval/real/` holds **0 cases**,
+so real-world accuracy is **not measured** (the 36/36 golden result is a fixture and guardrail check, not an accuracy figure).
+It needs at least 20 (`make accuracy-claim`).
 
 ---
 
@@ -520,6 +542,24 @@ The agent never writes to GitHub on its own. A caller proposes one file change, 
 Set `AGENT_APPROVALS_DB` (SQLite file), `AGENT_APPROVER_KEY` (must differ from `AGENT_API_KEY`, else 503), `AGENT_PR_REPOS` (comma-separated `owner/name` allowlist; empty allows nothing, checked again at approval) and `GITHUB_PR_TOKEN` (a separate fine-grained token: Contents + Pull requests write on those repos only; the read-only `GITHUB_TOKEN` is untouched). Paths under `.git/` or `.github/` and anything with `..` are refused, so a proposal cannot edit workflows. `X-Approver: <name>` is recorded as the approver label; the key itself is shared, so it is a label, not an identity. The change comes from the proposal: the agent does not generate code diffs. Single-org only (404 in product mode).
 
 **Terraform drift:** a `terraform plan` log containing the "Objects have changed outside of Terraform" section is diagnosed as `terraform_drift`, listing the changed/deleted resources with the header line as evidence. A real error in the same log keeps its own category. Suggestions are read-only (`terraform plan -refresh-only`, find who changed it, then update code or revert through the pipeline).
+
+---
+
+## 🚧 Phase 0: ship gates (before selling or opening signup)
+
+`make ship-gates` runs all five gates and exits 1 until each is clear. **Today none are**: the code for each exists and is tested, the inputs below are facts only the owner can supply.
+
+| Gate | Clear when | How |
+|---|---|---|
+| Real incidents | at least 20 real, sanitized cases in `data/eval/real/` that pass the leakage check, and `data/eval/real/MIN_REAL` is 20 | `python -m agent.real_case ...` (schema and labelling rules in `data/eval/real/README.md`), then `make accuracy-claim` |
+| Pricing | `make pricing-check` is clean: cost inputs, worst-case margin per plan, willingness-to-pay evidence, `PRICES_CONFIRMED` | `make pricing-measure` (needs an LLM key), fill `product/pricing_evidence.json`, then `make stripe-sync` |
+| Legal | `make legal-check` is clean: every field in `product/legal_docs/entity.json` filled, `product/LICENSE` and `CLA.md` resolved (`make legal-fill`), and `COUNSEL_REVIEWED` true after a lawyer has read `product/legal_docs/*.md`, `product/LICENSE` and `CLA.md` | Until then the legal pages answer 503 and signup stays closed |
+| Mail | a real test email arrived | `make mail-test TO=you@example.com`, check the inbox, then `python -m product.ship_gates record mail_test --to you@example.com` |
+| Stripe | the test-mode run passed (sync, checkout, webhook, usage report, cancel) | `STRIPE_SECRET_KEY=sk_test_... make stripe-e2e` records it itself on a clean run; live keys are refused |
+
+The mail and Stripe entries live in `product/ship_evidence.json`, expire after 30 days (`PRODUCT_SHIP_EVIDENCE_MAX_DAYS`) and are self-attested: they stop a forgotten step from looking done, they do not prove it. Passing `ship-gates` is not legal advice or a pricing decision; it only means the checks you set up are satisfied.
+
+**Hosted deployment** (`make prod-up`: Caddy HTTPS + product image + PostgreSQL, configured from `.env.production`, see `.env.production.example`) should wait until all five gates are clear.
 
 ---
 

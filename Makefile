@@ -1,4 +1,4 @@
-.PHONY: prod-up prod-down prod-logs prod-backup mail-test accuracy-claim legal-check legal-fill help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync stripe-e2e billing-report pricing-check pricing-measure
+.PHONY: ship-gates prod-up prod-down prod-logs prod-backup mail-test accuracy-claim legal-check legal-fill help ingest eval live-eval test report report-check up image image-product stripe-check stripe-sync stripe-e2e billing-report pricing-check pricing-measure
 
 help:
 	@echo "Targets: test eval live-eval report report-check ingest up image image-product"
@@ -74,6 +74,11 @@ pricing-check:
 pricing-measure:
 	python -m product.unit_economics measure
 
+# Phase 0 ship gates, all five at once: >= 20 real eval incidents, pricing, legal + counsel, mail test, Stripe test-mode run.
+# Exit 1 until every one is clear. Mail and Stripe runs are read from product/ship_evidence.json (see product/ship_gates.py).
+ship-gates:
+	python -m product.ship_gates
+
 # Hosted deployment (docker-compose.prod.yml: Caddy HTTPS + api + PostgreSQL). Needs .env.production.
 PROD = docker compose --env-file .env.production -f docker-compose.prod.yml
 
@@ -94,3 +99,4 @@ prod-backup:
 mail-test:
 	@test -n "$(TO)" || { echo "usage: make mail-test TO=you@example.com"; exit 2; }
 	$(PROD) exec -T api python -c "from product import mailer; assert mailer.configured(), 'SMTP_HOST/SMTP_FROM/PUBLIC_URL not all set'; mailer.send('$(TO)', 'Mail test', 'SMTP works.'); print('sent')"
+	@echo "Check that the mail arrived (inbox, not spam), then: python -m product.ship_gates record mail_test --to $(TO)"

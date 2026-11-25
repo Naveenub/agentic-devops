@@ -181,6 +181,12 @@ def main(argv=None) -> int:
         step("run aborted", False, f"{type(e).__name__}: {e}")
     bad = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(bad)}/{len(results)} steps passed")
+    if not bad:
+        try:  # the Phase 0 ship gate (make ship-gates) reads this; a write failure must not turn a pass into a fail
+            from product import ship_gates
+            ship_gates.record("stripe_e2e", plan=plan, steps=len(results))
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: could not record the run for make ship-gates: {type(e).__name__}: {e}")
     return 1 if bad else 0
 
 
